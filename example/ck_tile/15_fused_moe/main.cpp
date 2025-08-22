@@ -418,7 +418,7 @@ bool run(const ck_tile::ArgParser& arg_parser)
                                 prec_sw,
                                 prec_sq,
                                 prec_kw,
-                                block_m,
+                                block_m, // 32
                                 activation,
                                 gate_only,
                                 fused_quant,

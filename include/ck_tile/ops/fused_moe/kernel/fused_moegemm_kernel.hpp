@@ -130,6 +130,7 @@ struct FusedMoeGemmKernel
     // static_assert(kBlockPerCu > 0);
 
     using BlockShape = typename Pipeline::BlockShape; // this is FusedMoeGemmShape
+    static constexpr index_t BlockSize_ = BlockShape::BlockSize;
     static constexpr index_t kBlockSize = BlockShape::BlockSize;
 
     using ADataType            = typename Pipeline::Problem::ADataType;
@@ -146,7 +147,7 @@ struct FusedMoeGemmKernel
     using YDataType            = typename Pipeline::Problem::YDataType;
 
     using Traits                = typename Pipeline::Problem::Traits;
-    static constexpr bool UseUK = true;
+    static constexpr bool UseUK = false;
 
     static constexpr bool IsGateOnly          = Traits::IsGateOnly;
     static constexpr bool UseSmoothQuant      = Traits::UseSmoothQuant;
@@ -415,8 +416,8 @@ struct FusedMoeGemmKernel
                        topk_weight,
                        smem,
                        kargs.hidden_size,
-                       kargs.intermediate_size,
-                       kargs.stride_token);
+                       kargs.intermediate_size);
+                       //kargs.stride_token);
         }
     }
 };

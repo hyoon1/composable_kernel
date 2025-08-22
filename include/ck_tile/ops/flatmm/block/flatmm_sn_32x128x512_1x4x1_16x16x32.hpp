@@ -26,7 +26,9 @@ struct FlatmmSn_32x128x512_1x4x1_16x16x32_Base
     static constexpr index_t Warp_N = 16;
     static constexpr index_t Warp_K = 32;
 
-    static constexpr index_t BlockSize = 256;
+    static constexpr index_t BlockSize = 128;
+    //static constexpr index_t BlockSize = 256;
+    //static constexpr index_t BlockSize = get_warp_size() * NumWarps;
 
     // static constexpr index_t KPack = 2; // this is used to gurantee every threads can do dwordx4
 

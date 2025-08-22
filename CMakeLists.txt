@@ -338,6 +338,7 @@ endif()
 
 option(USE_BITINT_EXTENSION_INT4 "Whether to enable clang's BitInt extension to provide int4 data type." OFF)
 option(USE_OPT_GFX11 "Whether to enable LDS cumode and Wavefront32 mode for GFX11 silicons." OFF)
+option(USE_OPT_GFX12 "Whether to enable LDS cumode and Wavefront32 mode for GFX11 silicons." ON)
 option(ENABLE_ASM_DUMP "Whether to enable assembly dump for kernels." OFF)
 
 if(USE_BITINT_EXTENSION_INT4)

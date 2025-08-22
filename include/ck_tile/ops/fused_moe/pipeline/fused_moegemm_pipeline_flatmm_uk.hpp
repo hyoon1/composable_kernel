@@ -46,19 +46,19 @@ struct FusedMoeGemmPipeline_FlatmmUk
     static constexpr bool PadHiddenSize       = Traits::PadHiddenSize;
     static constexpr bool PadIntermediateSize = Traits::PadIntermediateSize;
 
-    static constexpr index_t kAlignmentA = Policy::template GetAlignment_A<Problem>();
-    static constexpr index_t kAlignmentG = Policy::template GetAlignment_G<Problem>();
-    static constexpr index_t kAlignmentD = Policy::template GetAlignment_D<Problem>();
-    static constexpr index_t kAlignmentO = Policy::template GetAlignment_O<Problem>();
+    static constexpr index_t kAlignmentA = Policy::template GetAlignment_A<Problem>(); // 4/2=2
+    static constexpr index_t kAlignmentG = Policy::template GetAlignment_G<Problem>(); // 16/2=8
+    static constexpr index_t kAlignmentD = Policy::template GetAlignment_D<Problem>(); // 16/2=8
+    static constexpr index_t kAlignmentO = Policy::template GetAlignment_O<Problem>(); // 2
 
-    static constexpr index_t SLD_A = static_cast<index_t>(FusedMoeGemmPipelineSequencerEnum::SLD_A);
-    static constexpr index_t GLD_A = static_cast<index_t>(FusedMoeGemmPipelineSequencerEnum::GLD_A);
-    static constexpr index_t GLD_B = static_cast<index_t>(FusedMoeGemmPipelineSequencerEnum::GLD_B);
-    static constexpr index_t GST_O = static_cast<index_t>(FusedMoeGemmPipelineSequencerEnum::GST_O);
+    static constexpr index_t SLD_A = static_cast<index_t>(FusedMoeGemmPipelineSequencerEnum::SLD_A); // 0b1
+    static constexpr index_t GLD_A = static_cast<index_t>(FusedMoeGemmPipelineSequencerEnum::GLD_A); // 0b100
+    static constexpr index_t GLD_B = static_cast<index_t>(FusedMoeGemmPipelineSequencerEnum::GLD_B); // 0b1000
+    static constexpr index_t GST_O = static_cast<index_t>(FusedMoeGemmPipelineSequencerEnum::GST_O); // 0b1000000
 
     static constexpr index_t kBlockPerCu = []() {
         if constexpr(Problem::kBlockPerCu != -1)
-            return Problem::kBlockPerCu;
+            return Problem::kBlockPerCu; // 1
         else
         {
             // minimize occupancy

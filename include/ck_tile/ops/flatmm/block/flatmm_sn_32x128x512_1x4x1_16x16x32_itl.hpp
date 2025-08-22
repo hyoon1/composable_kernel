@@ -41,7 +41,8 @@ struct FlatmmSn_32x128x512_1x4x1_16x16x32_BF16_itl : public FlatmmSn_32x128x512_
                index_t tile_offset_o)
     {
         static_assert(BCoords::size() == 8); // 8
-        static_assert(OCoords::size() == 8);
+        //static_assert(OCoords::size() == 8);
+        static_assert(OCoords::size() == 16);
 
         const index_t tile_stride_b_bytes = tile_offset_b * sizeof(BDataType);
         const index_t tile_stride_o_bytes = tile_offset_o * sizeof(ODataType);
@@ -288,7 +289,8 @@ struct FlatmmSn_32x128x512_1x4x1_16x16x32_FP16_itl : public FlatmmSn_32x128x512_
                index_t tile_offset_o)
     {
         static_assert(BCoords::size() == 8); // 8
-        static_assert(OCoords::size() == 8);
+        //static_assert(OCoords::size() == 8);
+        static_assert(OCoords::size() == 16);
 
         const index_t tile_stride_b_bytes = tile_offset_b * sizeof(BDataType);
         const index_t tile_stride_o_bytes = tile_offset_o * sizeof(ODataType);

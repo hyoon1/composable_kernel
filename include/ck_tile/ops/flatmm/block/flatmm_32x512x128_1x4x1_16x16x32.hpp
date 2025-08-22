@@ -50,7 +50,9 @@ struct Flatmm_32x512x128_1x4x1_16x16x32_Base // for f16/bf16
     static constexpr index_t Warp_N = 16;
     static constexpr index_t Warp_K = 32; // 16 * SubKPacks
 
-    static constexpr index_t BlockSize = 256;
+    static constexpr index_t BlockSize = 128;
+    //static constexpr index_t BlockSize = 256;
+    //static constexpr index_t BlockSize = get_warp_size() * NumWarps;
 
     static constexpr index_t SubKPacks = 2; // this is used to gurantee every threads can do dwordx4
 
@@ -418,8 +420,8 @@ struct Flatmm_32x512x128_1x4x1_16x16x32_BF16 : public Flatmm_32x512x128_1x4x1_16
                index_t tile_offset_b,
                bool_constant<Is2B> = {}) // for each tile, the offset to move for each unroll
     {
-        static_assert(ACoords::size() == Block_M * Block_K / BlockSize / 2 /*2x per dword*/); // 8
-        static_assert(BCoords::size() == Repeat_N);
+        static_assert(ACoords::size() == Block_M * Block_K / BlockSize / 2 /*2x per dword*/); // 8 // 32x128/128/2=16
+        static_assert(BCoords::size() == Repeat_N); // 8
 
         auto a_sst = make_tile_window(
             make_tensor_view<address_space_enum::lds>(

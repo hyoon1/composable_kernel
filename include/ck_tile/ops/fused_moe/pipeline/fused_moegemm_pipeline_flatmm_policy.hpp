@@ -23,10 +23,10 @@ struct FusedMoeGemmPipelineFlatmmPolicy
     CK_TILE_HOST_DEVICE static constexpr auto GetAlignment_A()
     {
         // using async
-        constexpr index_t copy_bytes = 4 * GetAsyncCopyDwords();
-        constexpr index_t data_bytes = sizeof(typename Problem::ADataType);
+        constexpr index_t copy_bytes = 4 * GetAsyncCopyDwords(); // 4x1=4
+        constexpr index_t data_bytes = sizeof(typename Problem::ADataType); // 2
         static_assert(copy_bytes % data_bytes == 0);
-        return copy_bytes / data_bytes;
+        return copy_bytes / data_bytes; // 4/2=2
     }
 
     template <typename Problem>
@@ -163,26 +163,26 @@ struct FusedMoeGemmPipelineFlatmmPolicy
     template <index_t MPerBlock, index_t KPerBlock, index_t NumWarps, index_t Alignment>
     CK_TILE_HOST_DEVICE static constexpr auto MakeGlobalTileDistribution_SimpleMxK_Async()
     {
-        constexpr index_t K_vec = Alignment;
-        constexpr index_t K_rem = KPerBlock / K_vec;
+        constexpr index_t K_vec = Alignment; // 2
+        constexpr index_t K_rem = KPerBlock / K_vec; // 128/2=64
 
-        if constexpr(get_warp_size() <= K_rem)
+        if constexpr(get_warp_size() <= K_rem) // 32<=64
         {
             static_assert(K_rem % get_warp_size() == 0);
-            constexpr index_t K_lan = get_warp_size(); // lane within same wave is along gemm-k
-            constexpr index_t K_wav = K_rem / get_warp_size();
+            constexpr index_t K_lan = get_warp_size(); // lane within same wave is along gemm-k // 32
+            constexpr index_t K_wav = K_rem / get_warp_size(); // 64/32=2
             static_assert(K_wav <= NumWarps, "do not support thread has repeat along K yet");
-            constexpr index_t M_wav = NumWarps / K_wav;
+            constexpr index_t M_wav = NumWarps / K_wav; // 4/2=2
             static_assert(MPerBlock % M_wav == 0, "this tile size is too small please check");
-            constexpr index_t M_rep = MPerBlock / M_wav;
+            constexpr index_t M_rep = MPerBlock / M_wav; // 32/2=16
             // NOTE: no swap, but hard to avoid LDS bank conflict
             return make_static_tile_distribution(
                 tile_distribution_encoding<
                     sequence<1>,
-                    tuple<sequence<M_rep, M_wav>, sequence<K_wav, K_lan, K_vec>>,
-                    tuple<sequence<1, 2>, sequence<2>>,
+                    tuple<sequence<M_rep, M_wav>, sequence<K_wav, K_lan, K_vec>>, // S<16, 2>, S<2, 32, 2>
+                    tuple<sequence<1, 2>, sequence<2>>, // <2, 2>, <32>
                     tuple<sequence<1, 0>, sequence<1>>,
-                    sequence<1, 2>,
+                    sequence<1, 2>, // <16, 2>
                     sequence<0, 2>>{});
         }
         else
@@ -229,10 +229,10 @@ struct FusedMoeGemmPipelineFlatmmPolicy
     template <typename Problem>
     CK_TILE_HOST_DEVICE static constexpr auto MakeGlobalTileDistribution_A()
     {
-        constexpr index_t Block_M_   = Problem::BlockShape::Block_M0;
-        constexpr index_t Block_K_   = Problem::BlockShape::Block_K0;
-        constexpr index_t NumWarps_  = Problem::BlockShape::NumWarps;
-        constexpr index_t Alignment_ = GetAlignment_A<Problem>();
+        constexpr index_t Block_M_   = Problem::BlockShape::Block_M0; // 32
+        constexpr index_t Block_K_   = Problem::BlockShape::Block_K0; // 128
+        constexpr index_t NumWarps_  = Problem::BlockShape::NumWarps; // 4
+        constexpr index_t Alignment_ = GetAlignment_A<Problem>(); // 2
         return MakeGlobalTileDistribution_SimpleMxK_Async<Block_M_,
                                                           Block_K_,
                                                           NumWarps_,
@@ -689,15 +689,14 @@ struct FusedMoeGemmPipelineFlatmmPolicy
     CK_TILE_HOST_DEVICE static constexpr auto GetWarpGemm1()
     {
         using S_               = typename Problem::BlockShape;
-        constexpr auto wg_ctrl = WGAttrCtlEnum::Raw_avv;
+        constexpr auto wg_ctrl = WGAttrCtlEnum::Raw_avv; // c-agpr, a-vgpr, b-vgpr
         // TODO: ugly
         if constexpr(std::is_same_v<typename Problem::YDataType, ck_tile::bf16_t> &&
                      std::is_same_v<typename Problem::DDataType, ck_tile::bf16_t> &&
                      S_::Warp_M0 == 32 && S_::Warp_N0 == 32 && S_::Warp_K0 == 16)
         {
-            return WarpGemmImpl<WarpGemmAttributeMfmaIterateKAndTransposedCDistribution_SwizzleB<
-                WarpGemmAttributeMfmaImplBf16Bf16F32M32N32K8<wg_ctrl>,
-                2>>{};
+            //return WarpGemmImpl<WarpGemmAttributeMfmaIterateKAndTransposedCDistribution_SwizzleB<WarpGemmAttributeMfmaImplBf16Bf16F32M32N32K8<wg_ctrl>, 2>>{};
+            return WarpGemmImpl<WarpGemmAttributeWmma<WarpGemmAttributeWmmaImpl<wg_ctrl>, 2>>{};
         }
         else if constexpr(std::is_same_v<typename Problem::YDataType, ck_tile::int8_t> &&
                           std::is_same_v<typename Problem::DDataType, ck_tile::int8_t> &&
