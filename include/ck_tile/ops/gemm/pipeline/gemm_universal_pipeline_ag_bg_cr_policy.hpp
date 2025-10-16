@@ -763,6 +763,7 @@ struct UniversalGemmBasePolicy
         using BlockGemm = remove_cvref_t<decltype(Derived::template GetBlockGemm<Problem>())>;
         constexpr index_t KPack = BlockGemm::Traits::KPack;
         return KPack;
+        //return 8;
     }
 
     template <typename Problem>
@@ -771,6 +772,7 @@ struct UniversalGemmBasePolicy
         using BlockGemm = remove_cvref_t<decltype(Derived::template GetBlockGemm<Problem>())>;
         constexpr index_t KPack = BlockGemm::Traits::KPack;
         return KPack;
+        //return 8;
     }
 
     template <typename Problem>
@@ -805,6 +807,45 @@ struct UniversalGemmBasePolicy
 struct UniversalGemmPipelineAgBgCrPolicy
     : public UniversalGemmBasePolicy<UniversalGemmPipelineAgBgCrPolicy>
 {
+    // DEBUG helper: print derived attributes (call from host before launching)
+    template <typename Problem>
+    CK_TILE_HOST static void DebugPrintWgAttr()
+    {
+        using Base = UniversalGemmBasePolicy<UniversalGemmPipelineAgBgCrPolicy>;
+
+        constexpr index_t warp_tile_n =
+            Problem::BlockGemmShape::WarpTile::at(Base::I1);
+        constexpr index_t warp_tile_k =
+            Problem::BlockGemmShape::WarpTile::at(Base::I2);
+
+        constexpr index_t vector_size =
+            DS_READ_TR_SIZE() / sizeof(typename Problem::ComputeDataType);
+        constexpr index_t thread_elements = warp_tile_n * warp_tile_k / get_warp_size();
+        //constexpr index_t thread_elements = warp_tile_n * warp_tile_k / 32;
+
+        constexpr auto wg_attr_num_access =
+            !(Base::template is_a_load_tr<Problem> || Base::template is_b_load_tr<Problem>)
+                ? WGAttrNumAccessEnum::Single
+            : vector_size == thread_elements
+                ? WGAttrNumAccessEnum::Single
+            : vector_size * 2 == thread_elements
+                ? WGAttrNumAccessEnum::Double
+            : vector_size * 4 == thread_elements
+                ? WGAttrNumAccessEnum::Quad
+                : WGAttrNumAccessEnum::Invalid;
+
+        std::printf("[UniversalGemmPolicy Debug]"
+                    " warp_tile_n=%d warp_tile_k=%d vector_size=%d thread_elements=%d wg_attr_num_access=%d\n",
+                    int(warp_tile_n),
+                    int(warp_tile_k),
+                    int(vector_size),
+                    int(thread_elements),
+                    int(wg_attr_num_access));
+
+        using BlockGemmType = decltype(UniversalGemmPipelineAgBgCrPolicy::template GetBlockGemm<Problem>());
+        BlockGemmType::DebugPrintBlockGemmHost();
+    }
+
     template <typename Problem>
     CK_TILE_HOST_DEVICE static constexpr auto GetBlockGemm()
     {

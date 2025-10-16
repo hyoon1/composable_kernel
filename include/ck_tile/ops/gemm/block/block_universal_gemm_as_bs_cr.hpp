@@ -61,6 +61,7 @@ struct BlockUniversalGemmAsBsCr
         static constexpr index_t MIterPerWarp = MPerBlock / (MWarp * WarpGemm::kM);
         static constexpr index_t NIterPerWarp = NPerBlock / (NWarp * WarpGemm::kN);
         static constexpr index_t KIterPerWarp = KPerBlock / WarpGemm::kK;
+        //static constexpr index_t KIterPerWarp = KPerBlock / 32;
 
         static_assert(MIterPerWarp * MWarp * WarpGemm::kM == MPerBlock,
                       "Error! Warps should cover all Block tile!");
@@ -70,6 +71,7 @@ struct BlockUniversalGemmAsBsCr
         static constexpr index_t MPerBlockPerIter = MWarp * WarpGemm::kM;
         static constexpr index_t NPerBlockPerIter = NWarp * WarpGemm::kN;
         static constexpr index_t KPerBlockPerIter = WarpGemm::kK;
+        //static constexpr index_t KPerBlockPerIter = 32;
 
         // Controls how many MAC clusters (MFMA blocks) we have per wave
         // Ie if
@@ -83,7 +85,10 @@ struct BlockUniversalGemmAsBsCr
 
         // should be at least equal to: WarpGemm::Impl::kABKPerLane
         static constexpr index_t KPack      = WarpGemm::kKPerThread;
+        //static constexpr index_t KPack      = 8;
+        //static constexpr index_t KPack      = 16;
         static constexpr index_t KPerThread = KIterPerWarp * WarpGemm::kKPerThread;
+        //static constexpr index_t KPerThread = KIterPerWarp * 16;
     };
 
     public:
@@ -133,13 +138,71 @@ struct BlockUniversalGemmAsBsCr
     using I0 = number<0>;
     using I1 = number<1>;
 
+    CK_TILE_HOST static void DebugPrintBlockGemmHost()
+    {
+        std::printf("[BlockUniversalGemm][host] "
+                    "WarpGemm::kM=%d WarpGemm::kN=%d WarpGemm::kK=%d WarpGemm::kKPerThread=%d "
+                    "MIterPerWarp=%d NIterPerWarp=%d KIterPerWarp=%d "
+                    "MPerBlockPerIter=%d NPerBlockPerIter=%d KPerBlockPerIter=%d "
+                    "MWarp=%d NWarp=%d "
+                    "KPack=%d KPerThread=%d BlockSize=%d\n",
+                    int(Traits::WarpGemm::kM),
+                    int(Traits::WarpGemm::kN),
+                    int(Traits::WarpGemm::kK),
+                    int(Traits::WarpGemm::kKPerThread),
+                    int(Traits::MIterPerWarp),
+                    int(Traits::NIterPerWarp),
+                    int(Traits::KIterPerWarp),
+                    int(Traits::MPerBlockPerIter),
+                    int(Traits::NPerBlockPerIter),
+                    int(Traits::KPerBlockPerIter),
+                    int(Traits::MWarp),
+                    int(Traits::NWarp),
+                    int(Traits::KPack),
+                    int(Traits::KPerThread),
+                    int(Traits::kBlockSize));
+    }
+
+    CK_TILE_DEVICE static void DebugPrintBlockGemmDevice(const char* sched_name)
+    {
+        if(blockIdx.x == 0 && threadIdx.x == 0)
+        {
+            printf("[BlockUniversalGemm][device] "
+                   "Sched=%s "
+                   "WarpGemm::kM=%d WarpGemm::kN=%d WarpGemm::kK=%d WarpGemm::kKPerThread=%d "
+                   "MIterPerWarp=%d NIterPerWarp=%d KIterPerWarp=%d "
+                   "MPerBlockPerIter=%d NPerBlockPerIter=%d KPerBlockPerIter=%d "
+                   "MWarp=%d NWarp=%d "
+                   "KPack=%d KPerThread=%d BlockSize=%d\n",
+                   sched_name,
+                   int(Traits::WarpGemm::kM),
+                   int(Traits::WarpGemm::kN),
+                   int(Traits::WarpGemm::kK),
+                   int(Traits::WarpGemm::kKPerThread),
+                   int(Traits::MIterPerWarp),
+                   int(Traits::NIterPerWarp),
+                   int(Traits::KIterPerWarp),
+                   int(Traits::MPerBlockPerIter),
+                   int(Traits::NPerBlockPerIter),
+                   int(Traits::KPerBlockPerIter),
+                   int(Traits::MWarp),
+                   int(Traits::NWarp),
+                   int(Traits::KPack),
+                   int(Traits::KPerThread),
+                   int(Traits::kBlockSize));
+        }
+    }
+
     CK_TILE_DEVICE static constexpr auto MakeABlockDistributionEncode()
     {
         constexpr index_t KPerThread     = Traits::KPerThread;
         constexpr index_t NumMacClusters = Traits::InterWaveSchedulingMacClusters;
         constexpr index_t KPerInnerLoop =
             ck_tile::max(KPerThread / NumMacClusters, WarpGemm::kKPerThread);
+        //constexpr index_t KPerInnerLoop =
+        //    ck_tile::max(KPerThread / NumMacClusters, 16);
         constexpr index_t KIterInterwave = KPerInnerLoop / WarpGemm::kKPerThread;
+        //constexpr index_t KIterInterwave = KPerInnerLoop / 16;
 
         using KIterSeq = std::conditional_t<Scheduler == GemmPipelineScheduler::Interwave,
                                             sequence<KIterInterwave>,
@@ -164,7 +227,10 @@ struct BlockUniversalGemmAsBsCr
         constexpr index_t NumMacClusters = Traits::InterWaveSchedulingMacClusters;
         constexpr index_t KPerInnerLoop =
             ck_tile::max(KPerThread / NumMacClusters, WarpGemm::kKPerThread);
+        //constexpr index_t KPerInnerLoop =
+        //    ck_tile::max(KPerThread / NumMacClusters, 16);
         constexpr index_t KIterInterwave = KPerInnerLoop / WarpGemm::kKPerThread;
+        //constexpr index_t KIterInterwave = KPerInnerLoop / 16;
 
         using KIterSeq = std::conditional_t<Scheduler == GemmPipelineScheduler::Interwave,
                                             sequence<KIterInterwave>,
@@ -214,6 +280,8 @@ struct BlockUniversalGemmAsBsCr
                                        bool_constant<ALoadTranspose> = {},
                                        bool_constant<BLoadTranspose> = {})
         {
+            BlockUniversalGemmAsBsCr::DebugPrintBlockGemmDevice("Default");
+
             static_assert(std::is_same_v<CDataType, typename CBlockTensor::DataType>,
                           "The CDataType as defined in traits should be the same as correspoinding "
                           "C block tensor data type!");
@@ -338,6 +406,8 @@ struct BlockUniversalGemmAsBsCr
                                        bool_constant<ALoadTranspose> = {},
                                        bool_constant<BLoadTranspose> = {})
         {
+            BlockUniversalGemmAsBsCr::DebugPrintBlockGemmDevice("Intrawave");
+
             static_assert(std::is_same_v<CDataType, typename CBlockTensor::DataType>,
                           "The CDataType as defined in traits should be the same as correspoinding "
                           "C block tensor data type!");
@@ -388,8 +458,11 @@ struct BlockUniversalGemmAsBsCr
         static constexpr index_t NumMacClusters = GemmTraits::InterWaveSchedulingMacClusters;
         static constexpr index_t KPerInnerLoop =
             ck_tile::max(KPerThread / NumMacClusters, WarpGemm::kKPerThread);
+        //static constexpr index_t KPerInnerLoop =
+        //    ck_tile::max(KPerThread / NumMacClusters, 16);
         static constexpr index_t KRepeat        = KPerThread / KPerInnerLoop;
         static constexpr index_t KInnerLoopIter = KPerInnerLoop / WarpGemm::kKPerThread;
+        //static constexpr index_t KInnerLoopIter = KPerInnerLoop / 16;
 
         static constexpr auto ALdsTileDistr =
             make_static_tile_distribution(MakeABlockDistributionEncode());
@@ -489,6 +562,8 @@ struct BlockUniversalGemmAsBsCr
                                        bool_constant<ALoadTranspose> a_load_tr = {},
                                        bool_constant<BLoadTranspose> b_load_tr = {})
         {
+            BlockUniversalGemmAsBsCr::DebugPrintBlockGemmDevice("Interwave");
+
             static_assert(std::is_same_v<CDataType, typename CBlockTensor::DataType>,
                           "The CDataType as defined in traits should be the same as correspoinding "
                           "C block tensor data type!");

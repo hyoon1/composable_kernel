@@ -49,6 +49,9 @@ template<> struct WarpGemmDispatcher<ck_tile::half_t, ck_tile::half_t, float, 64
 // WMMA cases
 #if defined(__gfx11__) || defined(__gfx12__)
 template<bool TransposeC> struct WarpGemmDispatcher<ck_tile::half_t, ck_tile::half_t, float, 16, 16, 16, TransposeC, false> { using Type = WarpGemmWmma_f32_16x16x16_f16_f16<TransposeC>;};
+template<bool TransposeC> struct WarpGemmDispatcher<ck_tile::half_t, ck_tile::half_t, float, 16, 16, 32, TransposeC, false> { using Type = WarpGemmWmma_f32_16x16x32_f16_f16<TransposeC>;};
+template<bool TransposeC> struct WarpGemmDispatcher<ck_tile::half_t, ck_tile::half_t, float, 16, 16, 32, TransposeC, false, false, WGAttrNumAccessEnum::Double> {
+        using Type = WarpGemmWmma_f32_16x16x32_f16_f16<TransposeC, WGAttrNumAccessEnum::Double>;};
 #else
 template<> struct WarpGemmDispatcher<ck_tile::half_t, ck_tile::half_t, float, 16, 16, 16, false> { using Type = WarpGemmMfmaF16F16F32M16N16K16; };
 template<> struct WarpGemmDispatcher<ck_tile::half_t, ck_tile::half_t, float, 16, 16, 16, true>  { using Type = WarpGemmMfmaF16F16F32M16N16K16TransposedCDistribution; };

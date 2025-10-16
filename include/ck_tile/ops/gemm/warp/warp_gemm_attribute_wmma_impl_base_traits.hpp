@@ -28,9 +28,10 @@ struct WmmaTraitsBase<gfx11_t, ADType, BDType, CDType>
     static constexpr index_t kRepeat      = 2;
     static constexpr index_t kAMLane      = 16;
     static constexpr index_t kBNLane      = 16;
-    static constexpr index_t kABK0PerLane = 1;
+    //static constexpr index_t kABK0PerLane = 1;
     static constexpr index_t kABKLane     = 1;
-    static constexpr index_t kABK1PerLane = 16;
+    //static constexpr index_t kABK1PerLane = 16;
+    static constexpr index_t kABKPerLane = 16;
 
     static constexpr index_t kCMLane     = 2;
     static constexpr index_t kCNLane     = 16;
@@ -38,9 +39,12 @@ struct WmmaTraitsBase<gfx11_t, ADType, BDType, CDType>
     static constexpr index_t kCM1PerLane = 1;
 
     using kABPs2RHssMajor = sequence<0, 2, 1>;
-    using kABPs2RHssMinor = sequence<0, 1, 0>;
-    using kABYs2RHsMajor  = sequence<2, 2>;
-    using kABYs2RHsMinor  = sequence<0, 2>;
+    //using kABPs2RHssMinor = sequence<0, 1, 0>;
+    using kABPs2RHssMinor = sequence<0, 0, 0>;
+    //using kABYs2RHsMajor  = sequence<2, 2>;
+    using kABYs2RHsMajor  = sequence<2>;
+    //using kABYs2RHsMinor  = sequence<0, 2>;
+    using kABYs2RHsMinor  = sequence<1>;
 
     using kCPs2RHssMajor = sequence<1, 2>;
     using kCPs2RHssMinor = sequence<1, 0>;
@@ -70,9 +74,10 @@ struct WmmaTraitsBase<gfx12_t, ADType, BDType, CDType>
     static constexpr index_t kRepeat      = 1;
     static constexpr index_t kAMLane      = 16;
     static constexpr index_t kBNLane      = 16;
-    static constexpr index_t kABK0PerLane = 1;
+    //static constexpr index_t kABK0PerLane = 1;
     static constexpr index_t kABKLane     = 2;
-    static constexpr index_t kABK1PerLane = 8;
+    //static constexpr index_t kABK1PerLane = 8;
+    static constexpr index_t kABKPerLane = 8;
 
     static constexpr index_t kCMLane     = 2;
     static constexpr index_t kCNLane     = 16;
@@ -80,9 +85,12 @@ struct WmmaTraitsBase<gfx12_t, ADType, BDType, CDType>
     static constexpr index_t kCM1PerLane = 8;
 
     using kABPs2RHssMajor = sequence<2, 1>;
-    using kABPs2RHssMinor = sequence<1, 0>;
-    using kABYs2RHsMajor  = sequence<2, 2>;
-    using kABYs2RHsMinor  = sequence<0, 2>;
+    //using kABPs2RHssMinor = sequence<1, 0>;
+    using kABPs2RHssMinor = sequence<0, 0>;
+    //using kABYs2RHsMajor  = sequence<2, 2>;
+    using kABYs2RHsMajor  = sequence<2>;
+    //using kABYs2RHsMinor  = sequence<0, 2>;
+    using kABYs2RHsMinor  = sequence<1>;
 
     using kCPs2RHssMajor = sequence<1, 2>;
     using kCPs2RHssMinor = sequence<1, 0>;

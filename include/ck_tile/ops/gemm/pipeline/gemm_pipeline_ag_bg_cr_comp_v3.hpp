@@ -230,16 +230,31 @@ struct GemmPipelineAgBgCrCompV3 : public BaseGemmPipelineAgBgCrCompV3<Problem>
 
         auto str = std::stringstream{};
 
-        str << "A/B vector size: " << GetVectorSizeA() << ", " << GetVectorSizeB() << "\n"
+        UniversalGemmPipelineAgBgCrPolicy::DebugPrintWgAttr<Problem>();
+
+        str << "BlockSize: " << BlockSize << "\n"
+            << "WarpGemm tile (M,N,K): " << MPerXDL << ", " << NPerXDL << ", " << KPerXDL << "\n"
+            << "WaveSize: " << WaveSize << " WaveNum(M,N): " << WaveNumM << ", " << WaveNumN << "\n"
+            << "Block tile (M,N,K): " << MPerBlock << ", " << NPerBlock << ", " << KPerBlock << "\n"
+            << "A/B vector size: " << GetVectorSizeA() << ", " << GetVectorSizeB() << "\n"
             << "A/B LDS read/write width: " << A_LDS_Read_Width << ", " << B_LDS_Read_Width << "\n"
-            << "A/B buffer load inst: " << A_Buffer_Load_Inst_Num << ", " << B_Buffer_Load_Inst_Num
-            << "\n"
-            << "A/B LDS write inst: " << A_LDS_Write_Inst_Num << ", " << B_LDS_Write_Inst_Num
-            << "\n"
+            << "A/B buffer load inst: " << A_Buffer_Load_Inst_Num << ", " << B_Buffer_Load_Inst_Num << "\n"
+            << "A/B LDS write inst: " << A_LDS_Write_Inst_Num << ", " << B_LDS_Write_Inst_Num << "\n"
             << "A/B LDS read inst: " << A_LDS_Read_Inst_Num << ", " << B_LDS_Read_Inst_Num << "\n"
             << "C MFMA inst: " << C_MFMA_Inst_Num << "\n"
             << "KPack: " << BlockGemm::Traits::KPack << "\n"
             << "PrefetchStages: " << PrefetchStages << "\n";
+
+        //str << "A/B vector size: " << GetVectorSizeA() << ", " << GetVectorSizeB() << "\n"
+        //    << "A/B LDS read/write width: " << A_LDS_Read_Width << ", " << B_LDS_Read_Width << "\n"
+        //    << "A/B buffer load inst: " << A_Buffer_Load_Inst_Num << ", " << B_Buffer_Load_Inst_Num
+        //    << "\n"
+        //    << "A/B LDS write inst: " << A_LDS_Write_Inst_Num << ", " << B_LDS_Write_Inst_Num
+        //    << "\n"
+        //    << "A/B LDS read inst: " << A_LDS_Read_Inst_Num << ", " << B_LDS_Read_Inst_Num << "\n"
+        //    << "C MFMA inst: " << C_MFMA_Inst_Num << "\n"
+        //    << "KPack: " << BlockGemm::Traits::KPack << "\n"
+        //    << "PrefetchStages: " << PrefetchStages << "\n";
         return str.str();
     }
 

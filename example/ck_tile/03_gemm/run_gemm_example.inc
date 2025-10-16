@@ -284,8 +284,44 @@ int run_gemm_example_with_layouts(ck_tile::ArgParser& arg_parser,
     bool persistent              = arg_parser.get_int("persistent");
     bool flush_cache             = arg_parser.get_bool("flush_cache");
     int rotating_count           = arg_parser.get_int("rotating_count");
+    const bool print_pipeline    = arg_parser.get_int("print_pipeline") != 0;
 
     const bool preshuffle = GemmConfig::Preshuffle;
+
+    if(print_pipeline)
+    {
+        using GemmShape = ck_tile::TileGemmShape<
+            ck_tile::sequence<GemmConfig::M_Tile, GemmConfig::N_Tile, GemmConfig::K_Tile>,
+            ck_tile::sequence<GemmConfig::M_Warp, GemmConfig::N_Warp, GemmConfig::K_Warp>,
+            ck_tile::sequence<GemmConfig::M_Warp_Tile, GemmConfig::N_Warp_Tile, GemmConfig::K_Warp_Tile>,
+            GemmConfig::PermuteA,
+            GemmConfig::PermuteB>;
+
+        using GemmUniversalTraits = ck_tile::TileGemmUniversalTraits<GemmConfig::kPadM,
+                                                                     GemmConfig::kPadN,
+                                                                     GemmConfig::kPadK,
+                                                                     GemmConfig::DoubleSmemBuffer,
+                                                                     ALayout,
+                                                                     BLayout,
+                                                                     CLayout,
+                                                                     GemmConfig::TransposeC,
+                                                                     GemmConfig::UseStructuredSparsity>;
+
+        using UniversalGemmProblem = ck_tile::UniversalGemmPipelineProblem<ADataType,
+                                                                           BDataType,
+                                                                           AccDataType,
+                                                                           GemmShape,
+                                                                           GemmUniversalTraits,
+                                                                           GemmConfig::Scheduler,
+                                                                           true,
+                                                                           ck_tile::TailNumber::Full>;
+
+        using GemmPipeline = typename PipelineTypeTraits<GemmConfig::Pipeline>::template GemmPipeline<
+            UniversalGemmProblem>;
+
+        std::cout << "[Pipeline] " << GemmPipeline::GetName() << "\n";
+        std::cout << GemmPipeline::Print();
+    }
 
     stride_A = ck_tile::get_default_stride(M, K, stride_A, is_row_major(a_layout));
     stride_B = ck_tile::get_default_stride(K, N, stride_B, is_row_major(b_layout));
