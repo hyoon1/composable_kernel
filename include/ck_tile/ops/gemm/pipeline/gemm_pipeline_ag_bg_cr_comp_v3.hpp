@@ -20,7 +20,8 @@ namespace ck_tile {
 template <typename Problem>
 struct BaseGemmPipelineAgBgCrCompV3
 {
-    static constexpr index_t PrefetchStages   = 2;
+    //static constexpr index_t PrefetchStages   = 2;
+    static constexpr index_t PrefetchStages   = 1;
     static constexpr index_t PrefillStages    = 1;
     static constexpr index_t GlobalBufferNum  = 1;
     static constexpr bool UsePersistentKernel = Problem::Traits::UsePersistentKernel;
@@ -230,16 +231,31 @@ struct GemmPipelineAgBgCrCompV3 : public BaseGemmPipelineAgBgCrCompV3<Problem>
 
         auto str = std::stringstream{};
 
-        str << "A/B vector size: " << GetVectorSizeA() << ", " << GetVectorSizeB() << "\n"
+        UniversalGemmPipelineAgBgCrPolicy::DebugPrintWgAttr<Problem>();
+
+        str << "BlockSize: " << BlockSize << "\n"
+            << "WarpGemm tile (M,N,K): " << MPerXDL << ", " << NPerXDL << ", " << KPerXDL << "\n"
+            << "WaveSize: " << WaveSize << " WaveNum(M,N): " << WaveNumM << ", " << WaveNumN << "\n"
+            << "Block tile (M,N,K): " << MPerBlock << ", " << NPerBlock << ", " << KPerBlock << "\n"
+            << "A/B vector size: " << GetVectorSizeA() << ", " << GetVectorSizeB() << "\n"
             << "A/B LDS read/write width: " << A_LDS_Read_Width << ", " << B_LDS_Read_Width << "\n"
-            << "A/B buffer load inst: " << A_Buffer_Load_Inst_Num << ", " << B_Buffer_Load_Inst_Num
-            << "\n"
-            << "A/B LDS write inst: " << A_LDS_Write_Inst_Num << ", " << B_LDS_Write_Inst_Num
-            << "\n"
+            << "A/B buffer load inst: " << A_Buffer_Load_Inst_Num << ", " << B_Buffer_Load_Inst_Num << "\n"
+            << "A/B LDS write inst: " << A_LDS_Write_Inst_Num << ", " << B_LDS_Write_Inst_Num << "\n"
             << "A/B LDS read inst: " << A_LDS_Read_Inst_Num << ", " << B_LDS_Read_Inst_Num << "\n"
             << "C MFMA inst: " << C_MFMA_Inst_Num << "\n"
             << "KPack: " << BlockGemm::Traits::KPack << "\n"
             << "PrefetchStages: " << PrefetchStages << "\n";
+
+        //str << "A/B vector size: " << GetVectorSizeA() << ", " << GetVectorSizeB() << "\n"
+        //    << "A/B LDS read/write width: " << A_LDS_Read_Width << ", " << B_LDS_Read_Width << "\n"
+        //    << "A/B buffer load inst: " << A_Buffer_Load_Inst_Num << ", " << B_Buffer_Load_Inst_Num
+        //    << "\n"
+        //    << "A/B LDS write inst: " << A_LDS_Write_Inst_Num << ", " << B_LDS_Write_Inst_Num
+        //    << "\n"
+        //    << "A/B LDS read inst: " << A_LDS_Read_Inst_Num << ", " << B_LDS_Read_Inst_Num << "\n"
+        //    << "C MFMA inst: " << C_MFMA_Inst_Num << "\n"
+        //    << "KPack: " << BlockGemm::Traits::KPack << "\n"
+        //    << "PrefetchStages: " << PrefetchStages << "\n";
         return str.str();
     }
 
@@ -255,71 +271,71 @@ struct GemmPipelineAgBgCrCompV3 : public BaseGemmPipelineAgBgCrCompV3<Problem>
 
         CK_TILE_DEVICE static constexpr auto HotLoopScheduler()
         {
-            constexpr index_t MPerXDL = BlockGemm::WarpGemm::kM;
-            constexpr index_t NPerXDL = BlockGemm::WarpGemm::kN;
-            constexpr index_t KPerXDL = BlockGemm::WarpGemm::WarpGemmAttribute::Impl::kK;
+            constexpr index_t MPerXDL = BlockGemm::WarpGemm::kM; // 16
+            constexpr index_t NPerXDL = BlockGemm::WarpGemm::kN; // 16
+            constexpr index_t KPerXDL = BlockGemm::WarpGemm::WarpGemmAttribute::Impl::kK; // 16
 
-            constexpr index_t WaveSize = get_warp_size();
-            constexpr index_t WaveNumM = BlockGemmShape::BlockWarps::at(I0{});
-            constexpr index_t WaveNumN = BlockGemmShape::BlockWarps::at(I1{});
+            constexpr index_t WaveSize = get_warp_size(); // 32
+            constexpr index_t WaveNumM = BlockGemmShape::BlockWarps::at(I0{}); // 4
+            constexpr index_t WaveNumN = BlockGemmShape::BlockWarps::at(I1{}); // 4
 
             // Below should be equal to AK1|BK1
-            constexpr index_t A_LDS_Read_Width = GetSmemPackA();
-            constexpr index_t B_LDS_Read_Width = GetSmemPackB();
+            constexpr index_t A_LDS_Read_Width = GetSmemPackA(); // 8
+            constexpr index_t B_LDS_Read_Width = GetSmemPackB(); // 8
 
-            constexpr index_t A_LDS_Write_Width = GetSmemPackA();
-            constexpr index_t B_LDS_Write_Width = GetSmemPackB();
+            constexpr index_t A_LDS_Write_Width = GetSmemPackA(); // 8
+            constexpr index_t B_LDS_Write_Width = GetSmemPackB(); // 8
 
             constexpr index_t A_Buffer_Load_Inst_Num =
-                MPerBlock * KPerBlock / (BlockSize * GetVectorSizeA());
+                MPerBlock * KPerBlock / (BlockSize * GetVectorSizeA()); // 256 * 64 / (512 * 8) = 4
             constexpr index_t B_Buffer_Load_Inst_Num =
-                NPerBlock * KPerBlock / (BlockSize * GetVectorSizeB());
+                NPerBlock * KPerBlock / (BlockSize * GetVectorSizeB()); // 128 * 64 / (512 * 8) = 2
 
             constexpr index_t A_LDS_Write_Inst_Num =
-                MPerBlock * KPerBlock / (BlockSize * A_LDS_Write_Width);
+                MPerBlock * KPerBlock / (BlockSize * A_LDS_Write_Width); // 256 * 64 / (512 * 8) = 4
             constexpr index_t B_LDS_Write_Inst_Num =
-                NPerBlock * KPerBlock / (BlockSize * B_LDS_Write_Width);
+                NPerBlock * KPerBlock / (BlockSize * B_LDS_Write_Width); // 128 * 64 / (512 * 8) = 2
 
             constexpr index_t A_LDS_Read_Inst_Num =
-                WaveNumN * MPerBlock * KPerBlock / (BlockSize * A_LDS_Read_Width);
+                WaveNumN * MPerBlock * KPerBlock / (BlockSize * A_LDS_Read_Width); // 4 * 256 * 64 / (512 * 8) = 16
             constexpr index_t B_LDS_Read_Inst_Num =
-                WaveNumM * NPerBlock * KPerBlock / (BlockSize * B_LDS_Read_Width);
+                WaveNumM * NPerBlock * KPerBlock / (BlockSize * B_LDS_Read_Width); // 4 * 128 * 64 / (512 * 8) = 8
 
             constexpr index_t C_MFMA_Inst_Num = MPerBlock * NPerBlock * KPerBlock /
                                                 (BlockSize / WaveSize) /
-                                                (MPerXDL * NPerXDL * KPerXDL);
+                                                (MPerXDL * NPerXDL * KPerXDL); // 256 * 128 * 64 / (512 / 32) / (16 * 16 * 16) = 32
 
             // A/B split schedule
             // compiler is likely to use ds_read2 when instruction width smaller than 16bytes
             constexpr auto num_ds_read_inst_a =
-                A_LDS_Read_Width * sizeof(ADataType) / APackedSize == 16 ? A_LDS_Read_Inst_Num
+                A_LDS_Read_Width * sizeof(ADataType) / APackedSize == 16 ? A_LDS_Read_Inst_Num // 8 * 2 / 1 = 16, 16
                                                                          : A_LDS_Read_Inst_Num / 2;
             constexpr auto num_ds_read_inst_b =
-                B_LDS_Read_Width * sizeof(BDataType) / BPackedSize == 16 ? B_LDS_Read_Inst_Num
+                B_LDS_Read_Width * sizeof(BDataType) / BPackedSize == 16 ? B_LDS_Read_Inst_Num // 8 * 2 / 1 = 16, 8
                                                                          : B_LDS_Read_Inst_Num / 2;
 
-            constexpr auto num_ds_write_inst_a = A_LDS_Write_Inst_Num;
-            constexpr auto num_ds_write_inst_b = B_LDS_Write_Inst_Num;
+            constexpr auto num_ds_write_inst_a = A_LDS_Write_Inst_Num; // 4
+            constexpr auto num_ds_write_inst_b = B_LDS_Write_Inst_Num; // 2
 
-            constexpr auto num_buffer_load_inst_a = A_Buffer_Load_Inst_Num;
-            constexpr auto num_buffer_load_inst_b = B_Buffer_Load_Inst_Num;
+            constexpr auto num_buffer_load_inst_a = A_Buffer_Load_Inst_Num; // 4
+            constexpr auto num_buffer_load_inst_b = B_Buffer_Load_Inst_Num; // 2
 
-            constexpr auto num_mfma_inst = C_MFMA_Inst_Num;
+            constexpr auto num_mfma_inst = C_MFMA_Inst_Num; // 32
 
-            constexpr auto mfma_cycle = NPerXDL == 16 ? 16 : 32;
+            constexpr auto mfma_cycle = NPerXDL == 16 ? 16 : 32; // 16
             constexpr auto ds_read_a_issue_cycle =
-                A_LDS_Read_Width * sizeof(ADataType) / APackedSize == 16 ? 8 : 4;
+                A_LDS_Read_Width * sizeof(ADataType) / APackedSize == 16 ? 8 : 4; // 8 * 2 / 1 = 16, 8
             constexpr auto ds_read_b_issue_cycle =
-                B_LDS_Read_Width * sizeof(BDataType) / BPackedSize == 16 ? 8 : 4;
+                B_LDS_Read_Width * sizeof(BDataType) / BPackedSize == 16 ? 8 : 4; // 8 * 2 / 1 = 16, 8
             constexpr auto ds_read_a_mfma_rate =
-                (mfma_cycle - 4 + 2 * ds_read_a_issue_cycle - 1) / (2 * ds_read_a_issue_cycle);
+                (mfma_cycle - 4 + 2 * ds_read_a_issue_cycle - 1) / (2 * ds_read_a_issue_cycle); // (16 - 4 + 2 * 8 - 1) / (2 * 8) = 1
             constexpr auto ds_read_b_mfma_rate =
-                (mfma_cycle - 4 + 2 * ds_read_b_issue_cycle - 1) / (2 * ds_read_b_issue_cycle);
+                (mfma_cycle - 4 + 2 * ds_read_b_issue_cycle - 1) / (2 * ds_read_b_issue_cycle); // (16 - 4 + 2 * 8 - 1) / (2 * 8) = 1
 
             constexpr auto num_dsread_a_mfma =
-                (num_ds_read_inst_a + ds_read_a_mfma_rate - 1) / ds_read_a_mfma_rate;
+                (num_ds_read_inst_a + ds_read_a_mfma_rate - 1) / ds_read_a_mfma_rate; // (16 + 1 - 1) / 1 = 16
             constexpr auto num_dsread_b_mfma =
-                (num_ds_read_inst_b + ds_read_b_mfma_rate - 1) / ds_read_b_mfma_rate;
+                (num_ds_read_inst_b + ds_read_b_mfma_rate - 1) / ds_read_b_mfma_rate; // (8 + 1 - 1) / 1 = 8
 
             // stage 1
             // Separate this part?
@@ -330,11 +346,11 @@ struct GemmPipelineAgBgCrCompV3 : public BaseGemmPipelineAgBgCrCompV3<Problem>
             //                                           sizeof(ADataType) : sizeof(ComputeDataType)
             //                                           / sizeof(BDataType);
             constexpr auto num_mfma_stage1 =
-                num_mfma_inst - (num_dsread_a_mfma + num_dsread_b_mfma);
+                num_mfma_inst - (num_dsread_a_mfma + num_dsread_b_mfma); // 32 - (16 + 8) = 8
             constexpr auto num_mfma_per_issue =
-                num_mfma_stage1 / (num_buffer_load_inst_a + num_buffer_load_inst_b);
-            constexpr auto num_dswrite_per_issue_a = num_ds_write_inst_a / num_buffer_load_inst_a;
-            constexpr auto num_dswrite_per_issue_b = num_ds_write_inst_b / num_buffer_load_inst_b;
+                num_mfma_stage1 / (num_buffer_load_inst_a + num_buffer_load_inst_b); // 8 / (4 + 2) = 1
+            constexpr auto num_dswrite_per_issue_a = num_ds_write_inst_a / num_buffer_load_inst_a; // 4 / 4 = 1
+            constexpr auto num_dswrite_per_issue_b = num_ds_write_inst_b / num_buffer_load_inst_b; // 2 / 2 = 1
 
             static_for<0, num_buffer_load_inst_a, 1>{}([&](auto i) {
                 ignore = i;
@@ -360,33 +376,33 @@ struct GemmPipelineAgBgCrCompV3 : public BaseGemmPipelineAgBgCrCompV3<Problem>
             });
 
             // stage 2
-            static_for<0, num_dsread_a_mfma, 1>{}([&](auto i) {
+            static_for<0, num_dsread_a_mfma, 1>{}([&](auto i) { // 16
                 if constexpr((num_ds_read_inst_a - (i + 1) * ds_read_a_mfma_rate) >=
-                             ds_read_a_mfma_rate)
+                             ds_read_a_mfma_rate) // 16 - (i + 1) * 1 >= 1
                 {
-                    __builtin_amdgcn_sched_group_barrier(0x100, ds_read_a_mfma_rate, 0); // DS read
+                    __builtin_amdgcn_sched_group_barrier(0x100, ds_read_a_mfma_rate, 0); // DS read // 1
                 }
                 else
                 {
                     __builtin_amdgcn_sched_group_barrier(
                         0x100,
-                        num_ds_read_inst_a - (num_dsread_a_mfma - 1) * ds_read_a_mfma_rate,
+                        num_ds_read_inst_a - (num_dsread_a_mfma - 1) * ds_read_a_mfma_rate, // 16 - (16 - 1) * 1 = 1
                         0); // DS read
                 }
                 __builtin_amdgcn_sched_group_barrier(0x008, 1, 0); // MFMA
             });
 
-            static_for<0, num_dsread_b_mfma, 1>{}([&](auto i) {
+            static_for<0, num_dsread_b_mfma, 1>{}([&](auto i) { // 8
                 if constexpr((num_ds_read_inst_b - (i + 1) * ds_read_b_mfma_rate) >=
-                             ds_read_b_mfma_rate)
+                             ds_read_b_mfma_rate) // 8 - (i + 1) * 1 >= 1
                 {
-                    __builtin_amdgcn_sched_group_barrier(0x100, ds_read_b_mfma_rate, 0); // DS read
+                    __builtin_amdgcn_sched_group_barrier(0x100, ds_read_b_mfma_rate, 0); // DS read // 1
                 }
                 else
                 {
                     __builtin_amdgcn_sched_group_barrier(
                         0x100,
-                        num_ds_read_inst_b - (num_dsread_b_mfma - 1) * ds_read_b_mfma_rate,
+                        num_ds_read_inst_b - (num_dsread_b_mfma - 1) * ds_read_b_mfma_rate, // 8 - (8 - 1) * 1 = 1
                         0); // DS read
                 }
                 __builtin_amdgcn_sched_group_barrier(0x008, 1, 0); // MFMA
@@ -476,64 +492,69 @@ struct GemmPipelineAgBgCrCompV3 : public BaseGemmPipelineAgBgCrCompV3<Problem>
 
             // -----------------------------------------------------------------------------------------
             // Gemm pipeline start
-            // initialize C
-            tile_elementwise_inout([](auto& c) { c = 0; }, c_block_tile);
+            //// initialize C
+            //tile_elementwise_inout([](auto& c) { c = 0; }, c_block_tile);
 
             // Load tile — during value loading, an elementwise function is executed for each A0,
             // A1, … AN. The values A0, A1, … AN are read by the same thread.
             auto elementwise_As_res =
                 load_tile_with_elementwise(a_copy_dram_window, a_element_func);
 
-            // Move each A — the enhanced function move_tile_window is executed, which takes a tuple
-            // as input.
-            move_tile_window(a_copy_dram_window, a_dram_tile_window_step);
-
             // Load tile — during value loading, an elementwise function is executed for each B0,
             // B1, … BN. The values B0, B1, … BN are read by the same thread.
             auto elementwise_Bs_res =
                 load_tile_with_elementwise(b_copy_dram_window, b_element_func);
+
+	    // Move each A — the enhanced function move_tile_window is executed, which takes a tuple
+            // as input.
+            move_tile_window(a_copy_dram_window, a_dram_tile_window_step);
 
             // Move each B — the enhanced function move_tile_window is executed, which takes a tuple
             // as input.
             move_tile_window(b_copy_dram_window, b_dram_tile_window_step);
 
             // LDS write 0
-            if constexpr(is_a_col_major && !is_a_load_tr_v())
-            {
-                auto a_shuffle_tmp = make_static_distributed_tensor<ADataType>(
-                    Policy::template MakeShuffledARegTileDistribution<Problem>());
-                transpose_tile2d(a_shuffle_tmp, elementwise_As_res);
-                Base::LocalPrefill(a_copy_lds_window, a_shuffle_tmp);
-            }
-            else
-            {
-                Base::LocalPrefill(a_copy_lds_window, elementwise_As_res);
-            }
-            if constexpr(is_b_row_major && !is_b_load_tr_v())
-            {
-                auto b_shuffle_tmp = make_static_distributed_tensor<BDataType>(
-                    Policy::template MakeShuffledBRegTileDistribution<Problem>());
-                transpose_tile2d(b_shuffle_tmp, elementwise_Bs_res);
-                Base::LocalPrefill(b_copy_lds_window, b_shuffle_tmp);
-            }
-            else
-            {
-                Base::LocalPrefill(b_copy_lds_window, elementwise_Bs_res);
-            }
+            //if constexpr(is_a_col_major && !is_a_load_tr_v())
+            //{
+            //    auto a_shuffle_tmp = make_static_distributed_tensor<ADataType>(
+            //        Policy::template MakeShuffledARegTileDistribution<Problem>());
+            //    transpose_tile2d(a_shuffle_tmp, elementwise_As_res);
+            //    Base::LocalPrefill(a_copy_lds_window, a_shuffle_tmp);
+            //}
+            //else
+            //{
+            //    Base::LocalPrefill(a_copy_lds_window, elementwise_As_res);
+            //}
+            //if constexpr(is_b_row_major && !is_b_load_tr_v())
+            //{
+            //    auto b_shuffle_tmp = make_static_distributed_tensor<BDataType>(
+            //        Policy::template MakeShuffledBRegTileDistribution<Problem>());
+            //    transpose_tile2d(b_shuffle_tmp, elementwise_Bs_res);
+            //    Base::LocalPrefill(b_copy_lds_window, b_shuffle_tmp);
+            //}
+            //else
+            //{
+            //    Base::LocalPrefill(b_copy_lds_window, elementwise_Bs_res);
+            //}
+            Base::LocalPrefill(a_copy_lds_window, elementwise_As_res);
+            Base::LocalPrefill(b_copy_lds_window, elementwise_Bs_res);
+
+            // initialize C
+            tile_elementwise_inout([](auto& c) { c = 0; }, c_block_tile);
 
             // global read 1
 
-            elementwise_As_res = load_tile_with_elementwise(a_copy_dram_window, a_element_func);
-            move_tile_window(a_copy_dram_window, a_dram_tile_window_step);
+            //elementwise_As_res = load_tile_with_elementwise(a_copy_dram_window, a_element_func);
+            //move_tile_window(a_copy_dram_window, a_dram_tile_window_step);
 
-            elementwise_Bs_res = load_tile_with_elementwise(b_copy_dram_window, b_element_func);
-            move_tile_window(b_copy_dram_window, b_dram_tile_window_step);
+            //elementwise_Bs_res = load_tile_with_elementwise(b_copy_dram_window, b_element_func);
+            //move_tile_window(b_copy_dram_window, b_dram_tile_window_step);
 
-            block_sync_lds();
-            block_gemm.LocalPrefetch(
-                a_lds_gemm_window, b_lds_gemm_window, is_a_load_tr_v, is_b_load_tr_v);
+            //block_sync_lds();
+            //block_gemm.LocalPrefetch(
+            //    a_lds_gemm_window, b_lds_gemm_window, is_a_load_tr_v, is_b_load_tr_v);
 
-            __builtin_amdgcn_sched_barrier(0);
+            //__builtin_amdgcn_sched_barrier(0);
 
             // main body
             if constexpr(HasHotLoop)
@@ -541,56 +562,178 @@ struct GemmPipelineAgBgCrCompV3 : public BaseGemmPipelineAgBgCrCompV3<Problem>
                 index_t i = 0;
                 do
                 {
-                    block_sync_lds();
-
-                    if constexpr(is_a_col_major && !is_a_load_tr_v())
-                    {
-                        auto a_shuffle_tmp = make_static_distributed_tensor<ADataType>(
-                            Policy::template MakeShuffledARegTileDistribution<Problem>());
-                        transpose_tile2d(a_shuffle_tmp, elementwise_As_res);
-                        Base::LocalPrefill(a_copy_lds_window, a_shuffle_tmp);
-                    }
-                    else
-                    {
-                        Base::LocalPrefill(a_copy_lds_window, elementwise_As_res);
-                    }
-                    if constexpr(is_b_row_major && !is_b_load_tr_v())
-                    {
-                        auto b_shuffle_tmp = make_static_distributed_tensor<BDataType>(
-                            Policy::template MakeShuffledBRegTileDistribution<Problem>());
-                        transpose_tile2d(b_shuffle_tmp, elementwise_Bs_res);
-                        Base::LocalPrefill(b_copy_lds_window, b_shuffle_tmp);
-                    }
-                    else
-                    {
-                        Base::LocalPrefill(b_copy_lds_window, elementwise_Bs_res);
-                    }
+                    //if constexpr(is_a_col_major && !is_a_load_tr_v())
+                    //{
+                    //    auto a_shuffle_tmp = make_static_distributed_tensor<ADataType>(
+                    //        Policy::template MakeShuffledARegTileDistribution<Problem>());
+                    //    transpose_tile2d(a_shuffle_tmp, elementwise_As_res);
+                    //    Base::LocalPrefill(a_copy_lds_window, a_shuffle_tmp);
+                    //}
+                    //else
+                    //{
+                    //    Base::LocalPrefill(a_copy_lds_window, elementwise_As_res);
+                    //}
+                    //if constexpr(is_b_row_major && !is_b_load_tr_v())
+                    //{
+                    //    auto b_shuffle_tmp = make_static_distributed_tensor<BDataType>(
+                    //        Policy::template MakeShuffledBRegTileDistribution<Problem>());
+                    //    transpose_tile2d(b_shuffle_tmp, elementwise_Bs_res);
+                    //    Base::LocalPrefill(b_copy_lds_window, b_shuffle_tmp);
+                    //}
+                    //else
+                    //{
+                    //    Base::LocalPrefill(b_copy_lds_window, elementwise_Bs_res);
+                    //}
 
                     elementwise_As_res =
                         load_tile_with_elementwise(a_copy_dram_window, a_element_func);
-                    move_tile_window(a_copy_dram_window, a_dram_tile_window_step);
+                    //move_tile_window(a_copy_dram_window, a_dram_tile_window_step);
 
                     elementwise_Bs_res =
                         load_tile_with_elementwise(b_copy_dram_window, b_element_func);
+
+                    move_tile_window(a_copy_dram_window, a_dram_tile_window_step);
                     move_tile_window(b_copy_dram_window, b_dram_tile_window_step);
+
+                    //__builtin_amdgcn_sched_barrier(0);
+
+                    block_sync_lds();
+		    block_gemm.LocalPrefetch(
+		        a_lds_gemm_window, b_lds_gemm_window, is_a_load_tr_v, is_b_load_tr_v);
+
+                    //__builtin_amdgcn_sched_group_barrier(0x100, 15, 0); // DS read
 
                     block_gemm(c_block_tile, a_lds_gemm_window, b_lds_gemm_window);
 
-                    block_sync_lds();
+                    //__builtin_amdgcn_sched_barrier(0);
+                    
+		    block_sync_lds();
 
-                    block_gemm.LocalPrefetch(
-                        a_lds_gemm_window, b_lds_gemm_window, is_a_load_tr_v, is_b_load_tr_v);
-                    HotLoopScheduler();
-                    __builtin_amdgcn_sched_barrier(0);
+                    //if constexpr(is_a_col_major && !is_a_load_tr_v())
+                    //{
+                    //    auto a_shuffle_tmp = make_static_distributed_tensor<ADataType>(
+                    //        Policy::template MakeShuffledARegTileDistribution<Problem>());
+                    //    transpose_tile2d(a_shuffle_tmp, elementwise_As_res);
+                    //    Base::LocalPrefill(a_copy_lds_window, a_shuffle_tmp);
+                    //}
+                    //else
+                    //{
+                    //    Base::LocalPrefill(a_copy_lds_window, elementwise_As_res);
+                    //}
+                    //if constexpr(is_b_row_major && !is_b_load_tr_v())
+                    //{
+                    //    auto b_shuffle_tmp = make_static_distributed_tensor<BDataType>(
+                    //        Policy::template MakeShuffledBRegTileDistribution<Problem>());
+                    //    transpose_tile2d(b_shuffle_tmp, elementwise_Bs_res);
+                    //    Base::LocalPrefill(b_copy_lds_window, b_shuffle_tmp);
+                    //}
+                    //else
+                    //{
+                    //    Base::LocalPrefill(b_copy_lds_window, elementwise_Bs_res);
+                    //}
+                    Base::LocalPrefill(a_copy_lds_window, elementwise_As_res);
+                    Base::LocalPrefill(b_copy_lds_window, elementwise_Bs_res);
 
+                    __builtin_amdgcn_sched_group_barrier(0x020, 8, 0); // VMEM read
+                    __builtin_amdgcn_sched_group_barrier(0x100, 24, 0); // DS read
+                    __builtin_amdgcn_sched_group_barrier(0x008, 24, 0); // MFMA
+                    __builtin_amdgcn_sched_group_barrier(0x200, 1, 0); // DS write
+                    __builtin_amdgcn_sched_group_barrier(0x008, 1, 0); // MFMA
+                    __builtin_amdgcn_sched_group_barrier(0x200, 1, 0); // DS write
+                    __builtin_amdgcn_sched_group_barrier(0x008, 1, 0); // MFMA
+                    __builtin_amdgcn_sched_group_barrier(0x200, 1, 0); // DS write
+                    __builtin_amdgcn_sched_group_barrier(0x008, 1, 0); // MFMA
+                    __builtin_amdgcn_sched_group_barrier(0x200, 1, 0); // DS write
+                    __builtin_amdgcn_sched_group_barrier(0x008, 1, 0); // MFMA
+                    __builtin_amdgcn_sched_group_barrier(0x200, 1, 0); // DS write
+                    __builtin_amdgcn_sched_group_barrier(0x008, 1, 0); // MFMA
+                    __builtin_amdgcn_sched_group_barrier(0x200, 1, 0); // DS write
+                    __builtin_amdgcn_sched_group_barrier(0x008, 1, 0); // MFMA
+                    __builtin_amdgcn_sched_group_barrier(0x008, 2, 0); // MFMA
+                    //__builtin_amdgcn_sched_group_barrier(0x020, 8, 0); // VMEM read
+                    //__builtin_amdgcn_sched_group_barrier(0x100, 19, 0); // DS read
+                    //__builtin_amdgcn_sched_group_barrier(0x008, 4, 0); // MFMA
+                    //__builtin_amdgcn_sched_group_barrier(0x100, 1, 0); // DS read
+                    //__builtin_amdgcn_sched_group_barrier(0x008, 4, 0); // MFMA
+                    //__builtin_amdgcn_sched_group_barrier(0x100, 1, 0); // DS read
+                    //__builtin_amdgcn_sched_group_barrier(0x008, 4, 0); // MFMA
+                    //__builtin_amdgcn_sched_group_barrier(0x100, 1, 0); // DS read
+                    //__builtin_amdgcn_sched_group_barrier(0x008, 1, 0); // MFMA
+                    //__builtin_amdgcn_sched_group_barrier(0x100, 1, 0); // DS read
+                    //__builtin_amdgcn_sched_group_barrier(0x008, 1, 0); // MFMA
+                    //__builtin_amdgcn_sched_group_barrier(0x100, 1, 0); // DS read
+                    //__builtin_amdgcn_sched_group_barrier(0x008, 1, 0); // MFMA
+                    //__builtin_amdgcn_sched_group_barrier(0x100, 1, 0); // DS read
+                    //__builtin_amdgcn_sched_group_barrier(0x008, 1, 0); // MFMA
+                    //__builtin_amdgcn_sched_group_barrier(0x100, 2, 0); // DS read
+                    //__builtin_amdgcn_sched_group_barrier(0x008, 4, 0); // MFMA
+                    //__builtin_amdgcn_sched_group_barrier(0x100, 1, 0); // DS read
+                    //__builtin_amdgcn_sched_group_barrier(0x008, 4, 0); // MFMA
+                    //__builtin_amdgcn_sched_group_barrier(0x100, 1, 0); // DS read
+                    //__builtin_amdgcn_sched_group_barrier(0x008, 4, 0); // MFMA
+                    //__builtin_amdgcn_sched_group_barrier(0x100, 1, 0); // DS read
+                    //__builtin_amdgcn_sched_group_barrier(0x008, 1, 0); // MFMA
+                    //__builtin_amdgcn_sched_group_barrier(0x100, 1, 0); // DS read
+                    //__builtin_amdgcn_sched_group_barrier(0x008, 1, 0); // MFMA
+                    //__builtin_amdgcn_sched_group_barrier(0x100, 1, 0); // DS read
+                    //__builtin_amdgcn_sched_group_barrier(0x008, 6, 0); // MFMA
+                    //__builtin_amdgcn_sched_group_barrier(0x020, 2, 0); // VMEM read
+                    //__builtin_amdgcn_sched_group_barrier(0x008, 4, 0); // MFMA
+                    //__builtin_amdgcn_sched_group_barrier(0x020, 1, 0); // VMEM read
+                    //__builtin_amdgcn_sched_group_barrier(0x008, 4, 0); // MFMA
+                    //__builtin_amdgcn_sched_group_barrier(0x020, 1, 0); // VMEM read
+                    //__builtin_amdgcn_sched_group_barrier(0x008, 1, 0); // MFMA
+                    //__builtin_amdgcn_sched_group_barrier(0x020, 1, 0); // VMEM read
+                    //__builtin_amdgcn_sched_group_barrier(0x008, 1, 0); // MFMA
+                    //__builtin_amdgcn_sched_group_barrier(0x020, 1, 0); // VMEM read
+                    //__builtin_amdgcn_sched_group_barrier(0x008, 1, 0); // MFMA
+                    //__builtin_amdgcn_sched_group_barrier(0x020, 2, 0); // VMEM read
+                    //__builtin_amdgcn_sched_group_barrier(0x008, 1, 0); // MFMA
+                    //__builtin_amdgcn_sched_group_barrier(0x020, 2, 0); // VMEM read
+                    //__builtin_amdgcn_sched_group_barrier(0x008, 4, 0); // MFMA
+                    //__builtin_amdgcn_sched_group_barrier(0x020, 2, 0); // VMEM read
+                    //__builtin_amdgcn_sched_group_barrier(0x008, 1, 0); // MFMA
+                    //__builtin_amdgcn_sched_group_barrier(0x200, 1, 0); // DS write
+                    //__builtin_amdgcn_sched_group_barrier(0x008, 1, 0); // MFMA
+                    //__builtin_amdgcn_sched_group_barrier(0x200, 1, 0); // DS write
+                    //__builtin_amdgcn_sched_group_barrier(0x008, 1, 0); // MFMA
+                    //__builtin_amdgcn_sched_group_barrier(0x200, 1, 0); // DS write
+                    //__builtin_amdgcn_sched_group_barrier(0x008, 1, 0); // MFMA
+                    //__builtin_amdgcn_sched_group_barrier(0x200, 1, 0); // DS write
+                    //__builtin_amdgcn_sched_group_barrier(0x008, 1, 0); // MFMA
+                    //__builtin_amdgcn_sched_group_barrier(0x200, 1, 0); // DS write
+                    //__builtin_amdgcn_sched_group_barrier(0x008, 1, 0); // MFMA
+                    //__builtin_amdgcn_sched_group_barrier(0x200, 1, 0); // DS write
+                    //__builtin_amdgcn_sched_group_barrier(0x008, 1, 0); // MFMA
+                    //__builtin_amdgcn_sched_group_barrier(0x200, 1, 0); // DS write
+                    //__builtin_amdgcn_sched_group_barrier(0x008, 1, 0); // MFMA
+                    //__builtin_amdgcn_sched_group_barrier(0x200, 1, 0); // DS write
+                    //__builtin_amdgcn_sched_group_barrier(0x008, 1, 0); // MFMA
+                    //__builtin_amdgcn_sched_group_barrier(0x200, 1, 0); // DS write
+                    //__builtin_amdgcn_sched_group_barrier(0x008, 1, 0); // MFMA
+                    //__builtin_amdgcn_sched_group_barrier(0x200, 1, 0); // DS write
+                    //__builtin_amdgcn_sched_group_barrier(0x008, 1, 0); // MFMA
+                    //__builtin_amdgcn_sched_group_barrier(0x200, 1, 0); // DS write
+                    //__builtin_amdgcn_sched_group_barrier(0x008, 1, 0); // MFMA
+                    //__builtin_amdgcn_sched_group_barrier(0x200, 1, 0); // DS write
+
+                    //block_gemm.LocalPrefetch(
+                    //    a_lds_gemm_window, b_lds_gemm_window, is_a_load_tr_v, is_b_load_tr_v);
+                    //HotLoopScheduler();
+		    //__builtin_amdgcn_sched_barrier(0);
                     i += 1;
                 } while(i < (num_loop - 1));
             }
+            //__builtin_amdgcn_sched_barrier(0);
             // tail
             if constexpr((TailNum == TailNumber::Full) || (TailNum == TailNumber::Odd))
             {
                 // Leak last MFMA block to epilogue region, cover the potential lds-shuffle
                 // latency
+                block_sync_lds();
+		block_gemm.LocalPrefetch(
+		    a_lds_gemm_window, b_lds_gemm_window, is_a_load_tr_v, is_b_load_tr_v);
+                //__builtin_amdgcn_sched_barrier(0);
                 block_gemm(c_block_tile, a_lds_gemm_window, b_lds_gemm_window);
             }
             else

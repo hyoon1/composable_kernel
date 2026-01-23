@@ -62,11 +62,11 @@ enum struct memory_operation_enum : std::uint16_t
 
 CK_TILE_HOST_DEVICE constexpr index_t get_warp_size()
 {
-#if defined(__GFX9__) || !defined(__HIP_DEVICE_COMPILE__)
-    return 64;
-#else
+//#if defined(__GFX9__) || !defined(__HIP_DEVICE_COMPILE__)
+//    return 64;
+//#else
     return 32;
-#endif
+//#endif
 }
 
 CK_TILE_HOST bool is_wave32()
@@ -191,7 +191,12 @@ CK_TILE_DEVICE void s_waitcnt_barrier()
 template <index_t lgkmcnt = 0>
 CK_TILE_DEVICE void block_sync_lds()
 {
-    s_waitcnt_barrier<waitcnt_arg::kMaxVmCnt, waitcnt_arg::kMaxExpCnt, lgkmcnt>();
+    //s_waitcnt_barrier<waitcnt_arg::kMaxVmCnt, waitcnt_arg::kMaxExpCnt, lgkmcnt>();
+    asm volatile("\
+    s_wait_dscnt 0x0 \n \
+    s_barrier_signal -1 \n \
+    s_barrier_wait -1 \
+    " ::);
 }
 
 template <index_t vmcnt = 0>
@@ -269,11 +274,11 @@ struct gfx12_t
 
 CK_TILE_DEVICE static constexpr auto get_device_arch()
 {
-#if defined(__gfx11__)
-    return gfx11_t{};
-#else // if defined(__gfx12__)
+//#if defined(__gfx11__)
+//    return gfx11_t{};
+//#else // if defined(__gfx12__)
     return gfx12_t{};
-#endif
+//#endif
 }
 
 enum LLVMSchedGroupMask : int32_t

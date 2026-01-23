@@ -41,9 +41,10 @@ struct WarpGemmAttributeWmmaImpl
     static constexpr index_t kRepeat      = Traits::kRepeat;
     static constexpr index_t kAMLane      = Traits::kAMLane;
     static constexpr index_t kBNLane      = Traits::kBNLane;
-    static constexpr index_t kABK0PerLane = Traits::kABK0PerLane;
+    //static constexpr index_t kABK0PerLane = Traits::kABK0PerLane;
     static constexpr index_t kABKLane     = Traits::kABKLane;
-    static constexpr index_t kABK1PerLane = Traits::kABK1PerLane;
+    //static constexpr index_t kABK1PerLane = Traits::kABK1PerLane;
+    static constexpr index_t kABKPerLane = Traits::kABKPerLane;
 
     static constexpr index_t kCMLane     = Traits::kCMLane;
     static constexpr index_t kCNLane     = Traits::kCNLane;

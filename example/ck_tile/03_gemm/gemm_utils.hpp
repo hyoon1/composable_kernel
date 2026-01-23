@@ -173,27 +173,29 @@ struct GemmConfigComputeV3_2 : public GemmConfigBase
     static constexpr bool DoubleSmemBuffer     = false;
     static constexpr ck_tile::index_t Pipeline = CK_TILE_PIPELINE_COMPUTE_V3;
 
-    static constexpr int kBlockPerCu = 2;
+    static constexpr int kBlockPerCu = 1;
 };
 
 template <typename PrecType>
 struct GemmConfigComputeV3_WMMA : public GemmConfigBase
 {
-    static constexpr ck_tile::index_t M_Tile = 128;
+    static constexpr ck_tile::index_t M_Tile = 256;
     static constexpr ck_tile::index_t N_Tile = 128;
-    static constexpr ck_tile::index_t K_Tile = 64 / sizeof(PrecType);
+    static constexpr ck_tile::index_t K_Tile = 128 / sizeof(PrecType);
 
     static constexpr ck_tile::index_t M_Warp = 4;
-    static constexpr ck_tile::index_t N_Warp = 2;
+    static constexpr ck_tile::index_t N_Warp = 4;
     static constexpr ck_tile::index_t K_Warp = 1;
 
     static constexpr ck_tile::index_t M_Warp_Tile = 16;
     static constexpr ck_tile::index_t N_Warp_Tile = 16;
     static constexpr ck_tile::index_t K_Warp_Tile = 16;
+    //static constexpr ck_tile::index_t K_Warp_Tile = 32;
 
     static constexpr bool DoubleSmemBuffer     = false;
     static constexpr ck_tile::index_t Pipeline = CK_TILE_PIPELINE_COMPUTE_V3;
 
+    //static constexpr int kBlockPerCu = 2;
     static constexpr int kBlockPerCu = 2;
 };
 
@@ -316,7 +318,8 @@ struct GemmConfigPreshufflePrefill : public GemmConfigBase
     static constexpr ck_tile::index_t N_Warp_Tile = 16;
     static constexpr ck_tile::index_t K_Warp_Tile = get_k_warp_tile_flatmm<PrecType, M_Warp_Tile>();
 
-    static constexpr int kBlockPerCu           = 2;
+    //static constexpr int kBlockPerCu           = 2;
+    static constexpr int kBlockPerCu           = 1;
     static constexpr auto Scheduler            = ck_tile::GemmPipelineScheduler::Default;
     static constexpr ck_tile::index_t Pipeline = CK_TILE_PIPELINE_PRESHUFFLE_V2;
     static constexpr bool Preshuffle           = true;
@@ -557,7 +560,8 @@ auto create_args()
         .insert("json", "0", "0: No Json, 1: Dump Results in Json format")
         .insert("jsonfile", "gemm.json", "json file name to dump results")
         .insert("flush_cache", "true", "flush cache before running the kernel, defaults to true")
-        .insert("rotating_count", "1000", "rotating count, defaults to 1000");
+        .insert("rotating_count", "1000", "rotating count, defaults to 1000")
+        .insert("print_pipeline", "0", "0: off, 1: print pipeline metrics");
     return arg_parser;
 }
 

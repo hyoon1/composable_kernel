@@ -289,14 +289,15 @@ struct UniversalGemmKernel
 
     CK_TILE_HOST static auto BlockSize()
     {
-        if(ck_tile::is_wave32())
-        {
-            return dim3(kBlockSize / 2);
-        }
-        else
-        {
-            return dim3(kBlockSize);
-        }
+        //if(ck_tile::is_wave32())
+        //{
+        //    return dim3(kBlockSize / 2);
+        //}
+        //else
+        //{
+        //    return dim3(kBlockSize);
+        //}
+        return dim3(kBlockSize);
     }
 
     CK_TILE_HOST static constexpr KernelArgs
