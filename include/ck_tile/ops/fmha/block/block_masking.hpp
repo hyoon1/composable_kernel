@@ -744,6 +744,111 @@ struct is_generic_attention_mask<GenericAttentionMask<IsMasking, IsLocal>> : std
 template <typename Mask>
 static constexpr bool is_generic_attention_mask_v = is_generic_attention_mask<Mask>::value;
 
+// Full rectangular mask that only clips to (y_total, x_total) without introducing causal / local
+// windows. Useful for masking padded tails while keeping the same code path as the generic mask.
+template <bool IsMasking_ = true>
+struct FullAttentionMask
+{
+    static constexpr bool IsMasking = IsMasking_;
+    static constexpr bool IsLocal   = false;
+
+    static constexpr const char* name = impl::MaskName<IsMasking, IsLocal>::name;
+
+    CK_TILE_HOST_DEVICE FullAttentionMask(index_t y_total_, index_t x_total_)
+        : mask_(0, x_total_, 0, y_total_, x_total_)
+    {
+    }
+
+    CK_TILE_HOST_DEVICE FullAttentionMask(index_t, index_t, index_t sink_, index_t y_total_, index_t x_total_)
+        : mask_(0, x_total_, sink_, y_total_, x_total_)
+    {
+    }
+
+    template <typename MaskCoordinates>
+    CK_TILE_HOST_DEVICE FullAttentionMask(const MaskCoordinates& mask_coord)
+        : mask_(0,
+                mask_coord.at(number<4>{}),
+                mask_coord.at(number<2>{}),
+                mask_coord.at(number<3>{}),
+                mask_coord.at(number<4>{}))
+    {
+    }
+
+    template <index_t YTile, index_t XTile>
+    CK_TILE_HOST_DEVICE constexpr auto
+    GetTileRangeAlongX(index_t i_y, number<YTile> height, number<XTile> width) const
+    {
+        return mask_.GetTileRangeAlongX(i_y, height, width);
+    }
+
+    template <index_t YTile, index_t XTile>
+    CK_TILE_HOST_DEVICE constexpr auto
+    GetSinkTileRangeAlongX(index_t i_y, number<YTile> height, number<XTile> width) const
+    {
+        return mask_.GetSinkTileRangeAlongX(i_y, height, width);
+    }
+
+    template <index_t TileHeight, index_t TileWidth>
+    CK_TILE_HOST_DEVICE constexpr auto GetTileRangeAlongX(index_t i_y,
+                                                          number<TileHeight> height,
+                                                          number<TileWidth> width,
+                                                          index_t num_splits,
+                                                          index_t i_split) const
+    {
+        return mask_.GetTileRangeAlongX(i_y, height, width, num_splits, i_split);
+    }
+
+    template <index_t TileHeight, index_t TileWidth>
+    CK_TILE_HOST_DEVICE constexpr auto GetSinkTileRangeAlongX(index_t i_y,
+                                                              number<TileHeight> height,
+                                                              number<TileWidth> width,
+                                                              index_t num_splits,
+                                                              index_t i_split) const
+    {
+        return mask_.GetSinkTileRangeAlongX(i_y, height, width, num_splits, i_split);
+    }
+
+    template <index_t YTile, index_t XTile>
+    CK_TILE_HOST_DEVICE constexpr auto
+    GetTileRangeAlongY(index_t i_x, number<YTile> height, number<XTile> width) const
+    {
+        return mask_.GetTileRangeAlongY(i_x, height, width);
+    }
+
+    CK_TILE_HOST_DEVICE constexpr auto IsOutOfBound(index_t i_y, index_t i_x) const
+    {
+        return mask_.IsOutOfBound(i_y, i_x);
+    }
+
+    CK_TILE_HOST_DEVICE constexpr auto IsOutOfSinkBound(index_t i_y, index_t i_x) const
+    {
+        return mask_.IsOutOfSinkBound(i_y, i_x);
+    }
+
+    template <index_t TileHeight, index_t TileWidth>
+    CK_TILE_HOST_DEVICE constexpr auto
+    IsEdgeTile(index_t i_y, index_t i_x, number<TileHeight> height, number<TileWidth> width) const
+    {
+        return mask_.IsEdgeTile(i_y, i_x, height, width);
+    }
+
+    private:
+    GenericAttentionMask<IsMasking, false> mask_;
+};
+
+template <typename>
+struct is_full_attention_mask : std::false_type
+{
+};
+
+template <bool IsMasking>
+struct is_full_attention_mask<FullAttentionMask<IsMasking>> : std::true_type
+{
+};
+
+template <typename Mask>
+static constexpr bool is_full_attention_mask_v = is_full_attention_mask<Mask>::value;
+
 // TODO: prefer use this function in host code
 // can convert from the FA style left/right to our generic coordinate
 // if left_size < 0 && right_size = 0, it is normal causal mask

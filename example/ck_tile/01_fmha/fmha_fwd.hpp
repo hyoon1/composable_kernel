@@ -281,6 +281,7 @@ struct fmha_fwd_args
 
     float p_drop;
     bool s_randval;
+    bool force_masked_tail = false;
 
     std::variant<std::pair<uint64_t, uint64_t>, std::pair<const void*, const void*>>
         drop_seed_offset;

@@ -346,9 +346,13 @@ fwd_result fmha_fwd_run(mode_enum mode,
     const bool has_group_k_padding =
         mode == mode_enum::group && (!seqlen_kpads.empty() && seqlen_kpads[0] > 0);
     const bool has_group_padding   = has_group_q_padding || has_group_k_padding;
-    const bool has_batch_q_padding = mode == mode_enum::batch && !q_eff_lens_per_batch.empty();
-    const bool has_batch_k_padding = mode == mode_enum::batch && !kv_eff_lens_per_batch.empty();
-    const bool has_batch_padding   = has_batch_q_padding || has_batch_k_padding;
+    const bool has_explicit_q_eff = mode == mode_enum::batch &&
+                                    (!q_eff_lens_per_batch.empty() && q_eff_lens_per_batch[0] != -1);
+    const bool has_explicit_k_eff = mode == mode_enum::batch &&
+                                    (!kv_eff_lens_per_batch.empty() && kv_eff_lens_per_batch[0] != -1);
+    bool has_batch_q_padding      = has_explicit_q_eff;
+    bool has_batch_k_padding      = has_explicit_k_eff;
+    bool has_batch_padding        = has_batch_q_padding || has_batch_k_padding;
     const bool using_appendkv      = (0 < seqlen_knew || 0 < rotary_dim);
     const bool using_pagedkv       = (0 < page_block_size);
     const bool using_splitkv       = (num_splits > 1) || use_cache_batch_idx;
@@ -435,27 +439,65 @@ fwd_result fmha_fwd_run(mode_enum mode,
     const auto seqstart_q_with_padding_host = to_seqstarts(seqlen_qpads);
     const auto seqstart_k_with_padding_host = to_seqstarts(seqlen_kpads);
 
+    auto lengths_vary = [](const std::vector<ck_tile::index_t>& lens) {
+        if(lens.empty())
+            return false;
+        for(std::size_t i = 1; i < lens.size(); ++i)
+        {
+            if(lens[i] != lens[0])
+                return true;
+        }
+        return false;
+    };
+
     // Optional batch-mode cumulative seqlen overrides
     std::vector<ck_tile::index_t> cuq_cum, cukv_cum;
     if(mode == mode_enum::batch)
     {
-        auto calculate_cumulative = [&](std::vector<ck_tile::index_t>& per_batch_vec,
+        const bool batch_q_lengths_vary = lengths_vary(seqlen_qs);
+        const bool batch_k_lengths_vary = lengths_vary(seqlen_ks);
+        const bool need_cuq            = has_explicit_q_eff || batch_q_lengths_vary;
+        const bool need_cuk            = has_explicit_k_eff || batch_k_lengths_vary;
+
+        auto calculate_cumulative = [&](const std::vector<ck_tile::index_t>& per_batch_vec,
                                         std::vector<ck_tile::index_t>& cum_vec) {
             if(!per_batch_vec.empty() && per_batch_vec[0] != -1)
             {
                 if(per_batch_vec.size() < static_cast<size_t>(batch))
                 {
-                    per_batch_vec.resize(batch, per_batch_vec.back());
+                    cum_vec.resize(batch + 1);
+                    cum_vec[0] = 0;
+                    for(int i = 0; i < batch; ++i)
+                    {
+                        const auto len = (i < static_cast<int>(per_batch_vec.size()))
+                                             ? per_batch_vec[i]
+                                             : per_batch_vec.back();
+                        cum_vec[i + 1] = cum_vec[i] + len;
+                    }
                 }
-                cum_vec.resize(batch + 1);
-                cum_vec[0] = 0;
-                for(int i = 0; i < batch; ++i)
-                    cum_vec[i + 1] = cum_vec[i] + per_batch_vec[i];
+                else
+                {
+                    cum_vec.resize(batch + 1);
+                    cum_vec[0] = 0;
+                    for(int i = 0; i < batch; ++i)
+                        cum_vec[i + 1] = cum_vec[i] + per_batch_vec[i];
+                }
             }
         };
 
-        calculate_cumulative(q_eff_lens_per_batch, cuq_cum);
-        calculate_cumulative(kv_eff_lens_per_batch, cukv_cum);
+        if(need_cuq)
+        {
+            calculate_cumulative(has_explicit_q_eff ? q_eff_lens_per_batch : seqlen_qs, cuq_cum);
+            has_batch_q_padding = !cuq_cum.empty();
+        }
+
+        if(need_cuk)
+        {
+            calculate_cumulative(has_explicit_k_eff ? kv_eff_lens_per_batch : seqlen_ks, cukv_cum);
+            has_batch_k_padding = !cukv_cum.empty();
+        }
+
+        has_batch_padding = has_batch_q_padding || has_batch_k_padding;
     }
 
     using TypeConfig = FmhaFwdTypeConfig<DataTypeConfig>;
@@ -1350,8 +1392,91 @@ fwd_result fmha_fwd_run(mode_enum mode,
 
         fmha_fwd_args fmha_args;
         init_args(fmha_args);
+        fmha_args.force_masked_tail = false;
 
-        return fmha_fwd(fmha_traits, fmha_args, sc);
+        const bool maybe_gfx12 =
+            ck_tile::get_device_name().compare(0, 5, "gfx12") == 0; // host-side check
+        const ck_tile::index_t tail_tile = 256;
+        const ck_tile::index_t seqlen_q0 = shape_seqlen_q;
+        const ck_tile::index_t tail_len  = (mode == mode_enum::batch) ? (seqlen_q0 % tail_tile) : 0;
+        const ck_tile::index_t tail_split_threshold = 192; // only split when tail is large enough
+        const bool can_tail_split = maybe_gfx12 && (mode == mode_enum::batch) && (batch == 1) &&
+                                    (tail_len >= tail_split_threshold) && (seqlen_q0 >= tail_tile) &&
+                                    (p_drop == 0.0f) && (mask.type == mask_enum::no_mask) &&
+                                    (bias.type == bias_enum::no_bias) &&
+                                    (qscale.type == quant_scale_enum::no_scale) &&
+                                    (init_sink_value == 0) && (num_splits == 1) &&
+                                    (hdim_q == 128 && hdim_v == 128) &&
+                                    (seqlen_qs.size() == 1 && seqlen_qs[0] == seqlen_q0);
+
+        if(!can_tail_split)
+        {
+            // For gfx12 misaligned lengths, run a single masked-tail kernel to keep the 256 tile.
+            fmha_args.force_masked_tail =
+                (maybe_gfx12 && (tail_len > 0) && (mode == mode_enum::batch));
+            return fmha_fwd(fmha_traits, fmha_args, sc);
+        }
+
+        // Prepare body and tail args/pointers.
+        const ck_tile::index_t tail_offset = seqlen_q0 - tail_len;
+
+        auto offset_bytes =
+            [](auto* base, ck_tile::index_t offset, ck_tile::index_t stride, std::size_t elem_size) {
+                return reinterpret_cast<std::remove_pointer_t<decltype(base)>*>(
+                    reinterpret_cast<char*>(base) +
+                    static_cast<std::size_t>(offset) * stride * elem_size);
+            };
+
+        fmha_fwd_args body_args = fmha_args;
+        body_args.seqlen_q      = tail_offset;
+        body_args.max_seqlen_q  = tail_offset;
+        body_args.force_masked_tail = false;
+
+        fmha_fwd_args tail_args = fmha_args;
+        tail_args.seqlen_q      = tail_len;
+        tail_args.max_seqlen_q  = tail_len;
+        tail_args.force_masked_tail = true;
+
+        // Shift Q/O/LSE/RandVal/Bias pointers to tail start; K/V stay at full length.
+        tail_args.q_ptr = offset_bytes(const_cast<void*>(fmha_args.q_ptr),
+                                       tail_offset,
+                                       fmha_args.stride_q,
+                                       sizeof(QDataType));
+        tail_args.o_ptr =
+            offset_bytes(fmha_args.o_ptr, tail_offset, fmha_args.stride_o, sizeof(ODataType));
+
+        if(fmha_args.lse_ptr != nullptr)
+        {
+            tail_args.lse_ptr =
+                offset_bytes(static_cast<LSEDataType*>(fmha_args.lse_ptr), tail_offset, 1, sizeof(LSEDataType));
+        }
+
+        if(fmha_args.rand_val_ptr != nullptr)
+        {
+            tail_args.rand_val_ptr =
+                offset_bytes(static_cast<RandValOutputDataType*>(fmha_args.rand_val_ptr),
+                             tail_offset,
+                             fmha_args.stride_randval,
+                             sizeof(RandValOutputDataType));
+        }
+
+        if(fmha_args.bias_ptr != nullptr && bias.type == bias_enum::elementwise_bias)
+        {
+            tail_args.bias_ptr =
+                offset_bytes(const_cast<void*>(fmha_args.bias_ptr),
+                             tail_offset,
+                             fmha_args.stride_bias,
+                             sizeof(BiasDataType));
+        }
+
+        // Dropout/LSE accumulators not used in this path (num_splits == 1 && p_drop == 0).
+
+        const float body_time = fmha_fwd(fmha_traits, body_args, sc);
+
+        fmha_fwd_traits tail_traits = fmha_traits;
+
+        const float tail_time = fmha_fwd(tail_traits, tail_args, sc);
+        return body_time + tail_time;
     };
     const float fwd_ave_time = run_fwd(stream_config);
     if(fwd_ave_time < 0.0f)

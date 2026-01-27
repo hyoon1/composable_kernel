@@ -90,7 +90,8 @@ using fmha_traits = ck_tile::TileFmhaTraits<{F_spad},
 
 using fmha_variant = ck_tile::ComposedAttention<{F_logits} * ck_tile::LOGITS_SOFT_CAP, CK_TILE_FMHA_FWD_FAST_EXP2>;
 
-using fmha_mask = {F_mask};
+using fmha_mask_base = {F_mask};
+using fmha_mask      = std::conditional_t<{F_tailmask}, ck_tile::FullAttentionMask<>, fmha_mask_base>;
 
 using fmha_pipeline_problem = ck_tile::BlockFmhaPipelineProblem<
     typename FmhaFwdTypeConfig<fmha_dtype>::QDataType,
@@ -288,13 +289,14 @@ class FmhaFwdApiTrait:
     skip: str
     tr_load: str
     sink: str
+    tailmask: str
     constraint: CppConstraint
 
     @property
     def name(self) -> str:
         return (
             f"{self.hdim}-{self.dtype}-{self.mode}-{self.bm0}-{self.bn0}-{self.bk0}-{self.bn0}-{self.bk1}-{self.bk0max}-"
-            + f"{self.vlayout}-{self.logits}-{self.mask}-{self.bias}-{self.lse}-{self.dropout}-{self.qscale}-{self.spad}-{self.skpad}-{self.dpad}-{self.dvpad}-{self.skip}-{self.sink}"
+            + f"{self.vlayout}-{self.logits}-{self.mask}-{self.bias}-{self.lse}-{self.dropout}-{self.qscale}-{self.spad}-{self.skpad}-{self.dpad}-{self.dvpad}-{self.skip}-{self.sink}-{self.tailmask}"
         )
 
     @property
@@ -318,6 +320,17 @@ class FmhaFwdApiTrait:
             assert False
 
     def seqtune(self, max_bm0: int) -> str:
+        # Tail-masked pipelines: prefer larger tiles for long bodies; only use small tiles for
+        # genuinely short tails (their seqlen_q is already the tail length when split).
+        if self.tailmask == "t":
+            if self.bm0 == 64:
+                return f"a.seqlen_q <= {self.bm0 * 4}"
+            if self.bm0 == 128:
+                return f"a.seqlen_q < {self.bm0 * 64}"
+            if self.bm0 == max_bm0:
+                return "true/*prefer the largest tile for long seq*/"
+            return f"a.seqlen_q <= {self.bm0}"
+
         # Prefer a small tile for short sequences and scale up as seqlen grows.
         # Keep legacy behavior for targets whose largest tile is 128 (gfx9 family).
         if max_bm0 <= 128:
@@ -336,8 +349,8 @@ class FmhaFwdApiTrait:
         if self.bm0 == 64:
             return f"a.seqlen_q <= {self.bm0 * 4}"
         if self.bm0 == 128:
-            # Let 128 handle moderate lengths; 256 takes over for long sequences (even if misaligned).
-            return f"a.seqlen_q < {self.bm0 * 64}"
+            # Prefer 128 for moderate lengths, or whenever the sequence is misaligned for 256-blocks.
+            return f"(a.seqlen_q < {self.bm0 * 64}) || (a.seqlen_q % {self.bm0 * 2} != 0)"
         if self.bm0 == max_bm0:
             return "true/*prefer the largest tile for long seq*/"
         return f"a.seqlen_q <= {self.bm0}"
@@ -420,6 +433,7 @@ class FmhaFwdPipeline:
     F_skip: str  # true/false
     F_trload: str  # true/false
     F_sink: str  # true/false
+    F_tailmask: str = "f"  # true/false, enable rectangular tail mask
     F_constraint: CppConstraint = field(default_factory=lambda: CppConstraint())
 
     @property
@@ -494,6 +508,8 @@ class FmhaFwdPipeline:
             n += "_sink"
         else:
             n += "_nsink"
+        if self.F_tailmask == "t":
+            n += "_tail"
 
         return n
 
@@ -566,6 +582,13 @@ class FmhaFwdApiPool:
                     for i_trait, trait in enumerate(
                         [trait for trait in pool_by_hdim if filter_fn(trait)]
                     ):
+                        mask_cpp_type = get_mask_cpp_type(trait.mask)
+                        mask_check = get_mask_cpp_check_expr(trait.mask)
+                        if trait.tailmask == "t":
+                            # Tail kernels use a full attention mask to clip the rectangular tail.
+                            mask_cpp_type = "ck_tile::FullAttentionMask<>"
+                            mask_check = "true"
+
                         inners += FMHA_FWD_API_INNER_DISPATCH.format(
                             F_if=if_(i_trait),
                             F_arch=arch,
@@ -573,8 +596,8 @@ class FmhaFwdApiPool:
                             F_vlayout=LAYOUT_MAP[trait.vlayout],
                             F_pipeline_enum=PIPELINE_ENUM_MAP[trait.pipeline_tag],
                             F_logits=BOOL_MAP[trait.logits],
-                            F_mask=get_mask_cpp_type(trait.mask),
-                            F_mask_check=get_mask_cpp_check_expr(trait.mask),
+                            F_mask=mask_cpp_type,
+                            F_mask_check=mask_check,
                             F_bias_check=BIAS_CHECK_MAP[trait.bias],
                             F_bias=BIAS_MAP[trait.bias],
                             F_lse=BOOL_MAP[trait.lse],
@@ -725,6 +748,7 @@ class FmhaFwdKernel:
             F_kernel=self._get_cpp_kernel_class_name(self.F_pipeline.tag),
             F_kargs_creator=self._get_cpp_kargs_creator_func_name(self.F_pipeline.tag),
             F_sink=BOOL_MAP[self.F_pipeline.F_sink],
+            F_tailmask=BOOL_MAP[self.F_pipeline.F_tailmask],
         )
 
     @property
@@ -768,6 +792,7 @@ class FmhaFwdKernel:
             skip=self.F_pipeline.F_skip,
             tr_load=self.F_pipeline.F_trload,
             sink=self.F_pipeline.F_sink,
+            tailmask=self.F_pipeline.F_tailmask,
             constraint=self.F_tile.F_constraint & self.F_pipeline.F_constraint,
         )
 
@@ -1120,6 +1145,18 @@ class KernelComponentFactoryGfx12(CompatibilityRuleFactory):
     _DT_FP8FP32 = ("fp8fp32",)
 
     @classmethod
+    def get_rules(cls) -> List[CompatibilityRule]:
+        rules = CompatibilityRuleFactory.get_rules()
+
+        def check_tail_mask(problem_ctx: ProblemContext, kernel_ctx: KernelContext) -> bool:
+            if kernel_ctx.pipeline.F_tailmask == "t":
+                return kernel_ctx.tile.F_bm0 in (64, 128, 256) and kernel_ctx.pipeline.F_mask in ("no", "s_no")
+            return True
+
+        rules.append(check_tail_mask)
+        return rules
+
+    @classmethod
     def supported_dtypes(cls) -> Tuple[str]:
         return cls._DT_FP16_BF16 + cls._DT_FP8_FP8BF16 + cls._DT_FP8FP32
 
@@ -1131,9 +1168,12 @@ class KernelComponentFactoryGfx12(CompatibilityRuleFactory):
                 ( 32,  32) : [FmhaFwdTileSize( 64,  64,  16,  32,  32,   32,  4, 1, 1,  4, 1, 1,  16, 16, 16,  16, 16, 16,  -1)],
                 ( 64,  64) : [FmhaFwdTileSize( 64,  64,  32,  64,  32,   64,  4, 1, 1,  4, 1, 1,  16, 16, 16,  16, 16, 16,  -1)],
                 (128, 128) : [
+                    # Triton default-like tile (BLOCK_M=64, BLOCK_N=32)
+                    FmhaFwdTileSize( 64,  32,  32, 128,  32,  128,  4, 1, 1,  4, 1, 1,  16, 16, 16,  16, 16, 16,  -1),
                     FmhaFwdTileSize( 64,  64,  32, 128,  32,  128,  4, 1, 1,  4, 1, 1,  16, 16, 16,  16, 16, 16,  -1),
                     # bigger m-tile to keep performance on long sequences
-                    FmhaFwdTileSize(128, 128,  32, 128,  32,  128,  8, 1, 1,  8, 1, 1,  16, 16, 16,  16, 16, 16,  -1),
+                    FmhaFwdTileSize(128, 128,  32, 128,  32,  128,  8, 1, 1,  8, 1, 1,  16, 16, 16,  16, 16, 16,  -1,
+                                    CppConstraint("(!t.is_group_mode) || (a.seqlen_q < 8192)")),
                     # largest tile for very long sequences
                     FmhaFwdTileSize(256, 128,  32, 128,  32,  128, 16, 1, 1, 16, 1, 1,  16, 16, 16,  16, 16, 16,  -1),
                 ],
@@ -1162,6 +1202,7 @@ class KernelComponentFactoryGfx12(CompatibilityRuleFactory):
         pipelines = []
         if dtype in cls._DT_FP16_BF16:
             qscale = "no"
+            base_constraint = CppConstraint("!a.force_masked_tail")
             for logits, mask, bias, lse, dropout, skip, sink in itertools.product(
                 ["t", "f"],
                 get_mask_map(mask_impl).keys(),
@@ -1171,11 +1212,40 @@ class KernelComponentFactoryGfx12(CompatibilityRuleFactory):
                 ["t", "f"],
                 ["t", "f"],
             ):
-                pipelines.append(FmhaFwdPipeline("qr", "row", "f", "f", "f", "f", logits, bias, lse, dropout, qscale, mask, skip, "f", sink))  # fmt: skip
+                if (
+                    mask in ["no", "s_no"]
+                    and bias == "no"
+                    and dropout == "f"
+                    and skip == "f"
+                    and sink == "f"
+                ):
+                    tail_constraint = CppConstraint("(a.force_masked_tail) && (a.seqlen_q != 0)")
+                    pipelines.append(
+                        FmhaFwdPipeline(
+                            "qr",
+                            "row",
+                            "t",
+                            "t",
+                            "f",
+                            "f",
+                            logits,
+                            bias,
+                            lse,
+                            dropout,
+                            qscale,
+                            mask,
+                            skip,
+                            "f",
+                            sink,
+                            F_tailmask="t",
+                            F_constraint=tail_constraint,
+                        )
+                    )
+                pipelines.append(FmhaFwdPipeline("qr", "row", "f", "f", "f", "f", logits, bias, lse, dropout, qscale, mask, skip, "f", sink, F_constraint=base_constraint))  # fmt: skip
                 # Length padding only (keep d/dv unpadded for divisible hdim)
-                pipelines.append(FmhaFwdPipeline("qr", "row", "t", "t", "f", "f", logits, bias, lse, dropout, qscale, mask, skip, "f", sink))  # fmt: skip
+                pipelines.append(FmhaFwdPipeline("qr", "row", "t", "t", "f", "f", logits, bias, lse, dropout, qscale, mask, skip, "f", sink, F_constraint=base_constraint))  # fmt: skip
                 # Full padding variant (keep for non-divisible hdim/dv)
-                pipelines.append(FmhaFwdPipeline("qr", "row", "t", "t", "t", "t", logits, bias, lse, dropout, qscale, mask, skip, "f", sink))  # fmt: skip
+                pipelines.append(FmhaFwdPipeline("qr", "row", "t", "t", "t", "t", logits, bias, lse, dropout, qscale, mask, skip, "f", sink, F_constraint=base_constraint))  # fmt: skip
         elif dtype in cls._DT_FP8_FP8BF16 or dtype in cls._DT_FP8FP32:
             # no need lse/dropout kernels
             for logits, qscale, mask, bias in itertools.product(
