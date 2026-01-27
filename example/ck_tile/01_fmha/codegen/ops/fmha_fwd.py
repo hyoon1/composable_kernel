@@ -315,10 +315,15 @@ class FmhaFwdApiTrait:
             assert False
 
     def seqtune(self, max_bm0: int) -> str:
-        if self.bm0 == max_bm0 or self.bm0 == 64:
-            return "true/*fall back to largest tile*/"
-        else:
+        if max_bm0 <= 128: # when the largest tile is 128 or less (e.g., gfx9)
+            if self.bm0 == max_bm0 or self.bm0 == 64:
+                return "true/*fall back to largest tile*/"
             return f"a.seqlen_q <= {self.bm0}"
+        if self.bm0 == 64:
+            return f"a.seqlen_q <= {self.bm0 * 256}"
+        if self.bm0 == max_bm0:
+            return "true/*fall back to largest tile*/"
+        return f"a.seqlen_q <= {self.bm0}"
 
     @property
     def skcheck(self) -> str:
@@ -1112,7 +1117,11 @@ class KernelComponentFactoryGfx12(CompatibilityRuleFactory):
                 #                             bm0, bn0, bk0, bn1, bk1,
                 ( 32,  32) : [FmhaFwdTileSize( 64,  64,  16,  32,  32,   32,  4, 1, 1,  4, 1, 1,  16, 16, 16,  16, 16, 16,  -1)],
                 ( 64,  64) : [FmhaFwdTileSize( 64,  64,  32,  64,  32,   64,  4, 1, 1,  4, 1, 1,  16, 16, 16,  16, 16, 16,  -1)],
-                (128, 128) : [FmhaFwdTileSize( 64,  64,  32, 128,  32,  128,  4, 1, 1,  4, 1, 1,  16, 16, 16,  16, 16, 16,  -1)],
+                (128, 128) : [
+                    FmhaFwdTileSize( 64,  64,  32, 128,  32,  128,  4, 1, 1,  4, 1, 1,  16, 16, 16,  16, 16, 16,  -1),
+                    # bigger m-tile to keep performance on long sequences
+                    FmhaFwdTileSize(256, 128,  32, 128,  32,  128, 16, 1, 1, 16, 1, 1,  16, 16, 16,  16, 16, 16,  -1),
+                ],
                 (192, 128) : [FmhaFwdTileSize( 64,  64,  32, 128,  32,  256,  4, 1, 1,  4, 1, 1,  16, 16, 16,  16, 16, 16,  -1)],
                 (256, 256) : [FmhaFwdTileSize( 64,  64,  32, 256,  32,  256,  4, 1, 1,  4, 1, 1,  16, 16, 16,  16, 16, 16,  -1)],
             }  # fmt: skip
@@ -1148,6 +1157,8 @@ class KernelComponentFactoryGfx12(CompatibilityRuleFactory):
                 ["t", "f"],
             ):
                 pipelines.append(FmhaFwdPipeline("qr", "row", "f", "f", "f", "f", logits, bias, lse, dropout, qscale, mask, skip, "f", sink))  # fmt: skip
+                # Length padding only (keep d/dv unpadded for divisible hdim)
+                pipelines.append(FmhaFwdPipeline("qr", "row", "t", "t", "f", "f", logits, bias, lse, dropout, qscale, mask, skip, "f", sink))  # fmt: skip
                 pipelines.append(FmhaFwdPipeline("qr", "row", "t", "t", "t", "t", logits, bias, lse, dropout, qscale, mask, skip, "f", sink))  # fmt: skip
         elif dtype in cls._DT_FP8_FP8BF16 or dtype in cls._DT_FP8FP32:
             # no need lse/dropout kernels
