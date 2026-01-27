@@ -13,7 +13,7 @@ endif()
 set(FMHA_FWD_KNOWN_APIS "fwd;fwd_splitkv;fwd_appendkv;pagedkv_prefill")
 set(FMHA_FWD_ENABLE_APIS "fwd" CACHE STRING
   "semicolon-separated list of APIs to generate (${FMHA_FWD_KNOWN_APIS}) & link, or \"all\".")
-if(BUILD_TESTING)
+if(BUILD_TESTING AND NOT FMHA_FWD_CODEGEN_FILTER)
   # Build instances of all APIs for tests
   message(DEBUG "Enabling all FWD APIs of CK Tile FMHA for because testing is enabled")
   set(FMHA_FWD_ENABLE_APIS "all")
@@ -47,9 +47,13 @@ set(FMHA_FWD_CODE_GEN_COMMON_ARGS
   ${CMAKE_CURRENT_LIST_DIR}/generate.py
   --targets ${FMHA_TARGETS_ARG}
   --api ${FMHA_FWD_APIS}
-  --optdim 32,64,80,128,256
+  --optdim 128
   # --filter fmha_fwd...
 )
+set(FMHA_FWD_CODEGEN_FILTER "" CACHE STRING "fnmatch-style filter passed to fmha_fwd codegen; defaults to all kernels when empty" FORCE)
+if(FMHA_FWD_CODEGEN_FILTER)
+  list(APPEND FMHA_FWD_CODE_GEN_COMMON_ARGS --filter ${FMHA_FWD_CODEGEN_FILTER})
+endif()
 set(FMHA_BWD_CODE_GEN_COMMON_ARGS
   ${CMAKE_CURRENT_LIST_DIR}/generate.py
   --targets ${FMHA_TARGETS_ARG}
@@ -63,7 +67,7 @@ set(FMHA_BWD_CODE_GEN_COMMON_ARGS
 # TODO: Consider to use a special receipt for testing only, or even two receipts: a small subset of
 # instances for quick CI runs and a larger subset for scheduled runs (the tests skip tests when
 # there is no corresponding instance for parameters).
-if(BUILD_TESTING)
+if(BUILD_TESTING AND NOT FMHA_FWD_CODEGEN_FILTER)
   # Filters are in the order of FMHA_FWD_KNOWN_APIS: fwd,fwd_splitkv_combine@fwd_splitkv,fwd_appendkv,pagedkv_prefill
   list(APPEND FMHA_FWD_CODE_GEN_COMMON_ARGS --filter *_nlogits*_nskip*_nsink*,*@*_nlogits*_nbias*_nsink*,*,*_nlogits*_nskip*_pagedkv*)
 endif()

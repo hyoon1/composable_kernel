@@ -300,7 +300,10 @@ class FmhaFwdApiTrait:
     @property
     def scheck(self) -> str:
         if self.mode == "group":
-            return "true/*group mode spad always true*/"  # group mode only generate spad/skpad == true
+            if self.spad == "t":
+                return "true"  # padded variant handles ragged lengths
+            else:
+                return f"a.max_seqlen_q % {self.bm0} == 0"
         if self.pipeline_tag in ["qr_async", "qr_async_trload", "qr_async_trload_v3"]:
             if self.spad == "t":
                 return "true"  # always support
@@ -315,15 +318,37 @@ class FmhaFwdApiTrait:
             assert False
 
     def seqtune(self, max_bm0: int) -> str:
-        if self.bm0 == max_bm0 or self.bm0 == 64:
-            return "true/*fall back to largest tile*/"
-        else:
+        # Prefer a small tile for short sequences and scale up as seqlen grows.
+        # Keep legacy behavior for targets whose largest tile is 128 (gfx9 family).
+        if max_bm0 <= 128:
+            if max_bm0 == 64:
+                return "true/*fall back to largest tile*/"
+            if self.bm0 == 64 and max_bm0 > 64:
+                return f"a.seqlen_q <= {self.bm0 * 4}"
+            if self.bm0 == 128:
+                return "true/*prefer the 128 tile for long seq*/"
+            if self.bm0 == max_bm0:
+                return "true/*fall back to largest tile*/"
             return f"a.seqlen_q <= {self.bm0}"
+
+        # For gfx12 paths that have a 256-row tile: use the small tiles only for short/mid
+        # sequences and keep the largest tile for long (ragged) tails to avoid perf cliffs.
+        if self.bm0 == 64:
+            return f"a.seqlen_q <= {self.bm0 * 4}"
+        if self.bm0 == 128:
+            # Let 128 handle moderate lengths; 256 takes over for long sequences (even if misaligned).
+            return f"a.seqlen_q < {self.bm0 * 64}"
+        if self.bm0 == max_bm0:
+            return "true/*prefer the largest tile for long seq*/"
+        return f"a.seqlen_q <= {self.bm0}"
 
     @property
     def skcheck(self) -> str:
         if self.mode == "group":
-            return "true/*group mode skpad always true*/"  # group mode only generate spad/skpad == true
+            if self.skpad == "t":
+                return "true"
+            else:
+                return f"a.seqlen_k % {self.bn0} == 0"
         if self.pipeline_tag == "qr_async":
             if self.skpad == "t":
                 return f"(a.cu_seqlen_k_ptr != nullptr) || (a.seqlen_k == 0 || a.seqlen_k % {self.bn0} != 0)"
@@ -789,14 +814,7 @@ def create_kernel(
 class CompatibilityRuleFactory:
     @staticmethod
     def get_rules() -> List[CompatibilityRule]:
-        # in group mode, spad/skpad must be true, since we can't predict if seqlen of current batch need pad or not
         def check_mode(problem_ctx: ProblemContext, kernel_ctx: KernelContext) -> bool:
-            if problem_ctx.mode == "group":
-                if (
-                    kernel_ctx.pipeline.F_spad != "t"
-                    or kernel_ctx.pipeline.F_skpad != "t"
-                ):
-                    return False
             return True
 
         def check_hdim(problem_ctx: ProblemContext, kernel_ctx: KernelContext) -> bool:
@@ -1112,7 +1130,13 @@ class KernelComponentFactoryGfx12(CompatibilityRuleFactory):
                 #                             bm0, bn0, bk0, bn1, bk1,
                 ( 32,  32) : [FmhaFwdTileSize( 64,  64,  16,  32,  32,   32,  4, 1, 1,  4, 1, 1,  16, 16, 16,  16, 16, 16,  -1)],
                 ( 64,  64) : [FmhaFwdTileSize( 64,  64,  32,  64,  32,   64,  4, 1, 1,  4, 1, 1,  16, 16, 16,  16, 16, 16,  -1)],
-                (128, 128) : [FmhaFwdTileSize( 64,  64,  32, 128,  32,  128,  4, 1, 1,  4, 1, 1,  16, 16, 16,  16, 16, 16,  -1)],
+                (128, 128) : [
+                    FmhaFwdTileSize( 64,  64,  32, 128,  32,  128,  4, 1, 1,  4, 1, 1,  16, 16, 16,  16, 16, 16,  -1),
+                    # bigger m-tile to keep performance on long sequences
+                    FmhaFwdTileSize(128, 128,  32, 128,  32,  128,  8, 1, 1,  8, 1, 1,  16, 16, 16,  16, 16, 16,  -1),
+                    # largest tile for very long sequences
+                    FmhaFwdTileSize(256, 128,  32, 128,  32,  128, 16, 1, 1, 16, 1, 1,  16, 16, 16,  16, 16, 16,  -1),
+                ],
                 (192, 128) : [FmhaFwdTileSize( 64,  64,  32, 128,  32,  256,  4, 1, 1,  4, 1, 1,  16, 16, 16,  16, 16, 16,  -1)],
                 (256, 256) : [FmhaFwdTileSize( 64,  64,  32, 256,  32,  256,  4, 1, 1,  4, 1, 1,  16, 16, 16,  16, 16, 16,  -1)],
             }  # fmt: skip
@@ -1148,6 +1172,9 @@ class KernelComponentFactoryGfx12(CompatibilityRuleFactory):
                 ["t", "f"],
             ):
                 pipelines.append(FmhaFwdPipeline("qr", "row", "f", "f", "f", "f", logits, bias, lse, dropout, qscale, mask, skip, "f", sink))  # fmt: skip
+                # Length padding only (keep d/dv unpadded for divisible hdim)
+                pipelines.append(FmhaFwdPipeline("qr", "row", "t", "t", "f", "f", logits, bias, lse, dropout, qscale, mask, skip, "f", sink))  # fmt: skip
+                # Full padding variant (keep for non-divisible hdim/dv)
                 pipelines.append(FmhaFwdPipeline("qr", "row", "t", "t", "t", "t", logits, bias, lse, dropout, qscale, mask, skip, "f", sink))  # fmt: skip
         elif dtype in cls._DT_FP8_FP8BF16 or dtype in cls._DT_FP8FP32:
             # no need lse/dropout kernels
