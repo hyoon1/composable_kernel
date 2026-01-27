@@ -346,9 +346,13 @@ fwd_result fmha_fwd_run(mode_enum mode,
     const bool has_group_k_padding =
         mode == mode_enum::group && (!seqlen_kpads.empty() && seqlen_kpads[0] > 0);
     const bool has_group_padding   = has_group_q_padding || has_group_k_padding;
-    const bool has_batch_q_padding = mode == mode_enum::batch && !q_eff_lens_per_batch.empty();
-    const bool has_batch_k_padding = mode == mode_enum::batch && !kv_eff_lens_per_batch.empty();
-    const bool has_batch_padding   = has_batch_q_padding || has_batch_k_padding;
+    const bool has_explicit_q_eff = mode == mode_enum::batch &&
+                                    (!q_eff_lens_per_batch.empty() && q_eff_lens_per_batch[0] != -1);
+    const bool has_explicit_k_eff = mode == mode_enum::batch &&
+                                    (!kv_eff_lens_per_batch.empty() && kv_eff_lens_per_batch[0] != -1);
+    bool has_batch_q_padding      = has_explicit_q_eff;
+    bool has_batch_k_padding      = has_explicit_k_eff;
+    bool has_batch_padding        = has_batch_q_padding || has_batch_k_padding;
     const bool using_appendkv      = (0 < seqlen_knew || 0 < rotary_dim);
     const bool using_pagedkv       = (0 < page_block_size);
     const bool using_splitkv       = (num_splits > 1) || use_cache_batch_idx;
@@ -435,27 +439,65 @@ fwd_result fmha_fwd_run(mode_enum mode,
     const auto seqstart_q_with_padding_host = to_seqstarts(seqlen_qpads);
     const auto seqstart_k_with_padding_host = to_seqstarts(seqlen_kpads);
 
+    auto lengths_vary = [](const std::vector<ck_tile::index_t>& lens) {
+        if(lens.empty())
+            return false;
+        for(std::size_t i = 1; i < lens.size(); ++i)
+        {
+            if(lens[i] != lens[0])
+                return true;
+        }
+        return false;
+    };
+
     // Optional batch-mode cumulative seqlen overrides
     std::vector<ck_tile::index_t> cuq_cum, cukv_cum;
     if(mode == mode_enum::batch)
     {
-        auto calculate_cumulative = [&](std::vector<ck_tile::index_t>& per_batch_vec,
+        const bool batch_q_lengths_vary = lengths_vary(seqlen_qs);
+        const bool batch_k_lengths_vary = lengths_vary(seqlen_ks);
+        const bool need_cuq            = has_explicit_q_eff || batch_q_lengths_vary;
+        const bool need_cuk            = has_explicit_k_eff || batch_k_lengths_vary;
+
+        auto calculate_cumulative = [&](const std::vector<ck_tile::index_t>& per_batch_vec,
                                         std::vector<ck_tile::index_t>& cum_vec) {
             if(!per_batch_vec.empty() && per_batch_vec[0] != -1)
             {
                 if(per_batch_vec.size() < static_cast<size_t>(batch))
                 {
-                    per_batch_vec.resize(batch, per_batch_vec.back());
+                    cum_vec.resize(batch + 1);
+                    cum_vec[0] = 0;
+                    for(int i = 0; i < batch; ++i)
+                    {
+                        const auto len = (i < static_cast<int>(per_batch_vec.size()))
+                                             ? per_batch_vec[i]
+                                             : per_batch_vec.back();
+                        cum_vec[i + 1] = cum_vec[i] + len;
+                    }
                 }
-                cum_vec.resize(batch + 1);
-                cum_vec[0] = 0;
-                for(int i = 0; i < batch; ++i)
-                    cum_vec[i + 1] = cum_vec[i] + per_batch_vec[i];
+                else
+                {
+                    cum_vec.resize(batch + 1);
+                    cum_vec[0] = 0;
+                    for(int i = 0; i < batch; ++i)
+                        cum_vec[i + 1] = cum_vec[i] + per_batch_vec[i];
+                }
             }
         };
 
-        calculate_cumulative(q_eff_lens_per_batch, cuq_cum);
-        calculate_cumulative(kv_eff_lens_per_batch, cukv_cum);
+        if(need_cuq)
+        {
+            calculate_cumulative(has_explicit_q_eff ? q_eff_lens_per_batch : seqlen_qs, cuq_cum);
+            has_batch_q_padding = !cuq_cum.empty();
+        }
+
+        if(need_cuk)
+        {
+            calculate_cumulative(has_explicit_k_eff ? kv_eff_lens_per_batch : seqlen_ks, cukv_cum);
+            has_batch_k_padding = !cukv_cum.empty();
+        }
+
+        has_batch_padding = has_batch_q_padding || has_batch_k_padding;
     }
 
     using TypeConfig = FmhaFwdTypeConfig<DataTypeConfig>;
