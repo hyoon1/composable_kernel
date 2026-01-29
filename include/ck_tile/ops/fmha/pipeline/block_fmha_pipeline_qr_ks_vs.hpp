@@ -74,19 +74,71 @@ struct BlockFmhaPipelineQRKSVS
 
     // last dimension vector length used to create tensor view(and decide buffer_load vector length)
     // ... together with tensor distribution. tensor dist should able to overwrite this
-    static constexpr index_t kAlignmentQ =
-        kPadHeadDimQ ? 1 : Policy::template GetAlignmentQ<Problem>();
-    static constexpr index_t kAlignmentK =
-        kPadHeadDimQ ? 1 : Policy::template GetAlignmentK<Problem>();
+    static constexpr index_t kAlignmentQ = []() {
+        constexpr index_t align_q = Policy::template GetAlignmentQ<Problem>();
+        if constexpr(kPadHeadDimQ)
+        {
+            // Keep vectorized loads if head dim is already aligned; otherwise fall back to scalar.
+            return (kQKHeaddim % align_q == 0) ? align_q : 1;
+        }
+        else
+        {
+            return align_q;
+        }
+    }();
+    static constexpr index_t kAlignmentK = []() {
+        constexpr index_t align_k = Policy::template GetAlignmentK<Problem>();
+        if constexpr(kPadHeadDimQ)
+        {
+            return (kQKHeaddim % align_k == 0) ? align_k : 1;
+        }
+        else
+        {
+            return align_k;
+        }
+    }();
     static constexpr index_t kAlignmentV = []() {
         if constexpr(std::is_same_v<VLayout, ck_tile::tensor_layout::gemm::RowMajor>)
-            return kPadHeadDimV ? 1 : Policy::template GetAlignmentV<Problem>();
+        {
+            constexpr index_t align_v = Policy::template GetAlignmentV<Problem>();
+            if constexpr(kPadHeadDimV)
+            {
+                if constexpr(requires { BlockFmhaShape::kVHeaddim; })
+                {
+                    return (BlockFmhaShape::kVHeaddim % align_v == 0) ? align_v : 1;
+                }
+                else
+                {
+                    return 1;
+                }
+            }
+            else
+            {
+                return align_v;
+            }
+        }
         else
             return kPadSeqLenK ? 1 : Policy::template GetAlignmentV<Problem>();
     }();
 
-    static constexpr index_t kAlignmentO =
-        kPadHeadDimV ? 1 : Policy::template GetAlignmentO<Problem>();
+    static constexpr index_t kAlignmentO = []() {
+        constexpr index_t align_o = Policy::template GetAlignmentO<Problem>();
+        if constexpr(kPadHeadDimV)
+        {
+            if constexpr(requires { BlockFmhaShape::kVHeaddim; })
+            {
+                return (BlockFmhaShape::kVHeaddim % align_o == 0) ? align_o : 1;
+            }
+            else
+            {
+                return 1;
+            }
+        }
+        else
+        {
+            return align_o;
+        }
+    }();
     static constexpr index_t kAlignmentBias =
         kPadSeqLenK ? 1 : Policy::template GetAlignmentBias<Problem>();
     static constexpr index_t kAlignmentRandVal =
@@ -278,11 +330,17 @@ struct BlockFmhaPipelineQRKSVS
         const auto num_sink_loop = integer_divide_ceil(sink_seq_end, kN0);
         const auto num_total_loop =
             integer_divide_ceil(seqlen_k_end - seqlen_k_start, kN0) + num_sink_loop;
+        // If seqlen_k is already tile-aligned, we can skip padding-specific checks even though
+        // this pipeline was generated with skpad=t.
+        const bool needs_k_padding =
+            kPadSeqLenK &&
+            ((seqlen_k_end - seqlen_k_start) % kN0 != 0 || seqlen_k_start % kN0 != 0 ||
+             sink_seq_end % kN0 != 0);
 
         // check early exit if no work to do
         if constexpr(FmhaMask::IsMasking || kPadSeqLenK)
         {
-            if(num_total_loop <= 0)
+            if((FmhaMask::IsMasking || needs_k_padding) && num_total_loop <= 0)
             {
                 if constexpr(kStoreLSE)
                 {
@@ -522,40 +580,43 @@ struct BlockFmhaPipelineQRKSVS
             move_tile_window(bias_dram_window, {0, kN0});
             if constexpr(kPadSeqLenK || FmhaMask::IsMasking)
             {
-                const auto k_origin      = k_dram_block_window.get_window_origin();
-                bool need_perpixel_check = mask.IsEdgeTile(q_origin.at(number<0>{}),
-                                                           k_origin.at(number<0>{}),
-                                                           number<kM0>{},
-                                                           number<kN0>{});
-                if(need_perpixel_check)
+                if(FmhaMask::IsMasking || needs_k_padding)
                 {
-                    auto apply_mask = [&](auto&& mask_func) {
-                        set_tile_if(
-                            s_acc, -numeric<SMPLComputeDataType>::infinity(), [&](auto tile_idx) {
-                                const auto row =
-                                    q_origin.at(number<0>{}) + tile_idx.at(number<0>{});
-                                const auto col =
-                                    k_origin.at(number<0>{}) + tile_idx.at(number<1>{});
-                                return !mask_func(variant_params,
-                                                  block_indices.batch_idx,
-                                                  row,
-                                                  col,
-                                                  block_indices.qo_head_idx,
-                                                  block_indices.kv_head_idx);
-                            });
-                    };
+                    const auto k_origin      = k_dram_block_window.get_window_origin();
+                    bool need_perpixel_check = mask.IsEdgeTile(q_origin.at(number<0>{}),
+                                                               k_origin.at(number<0>{}),
+                                                               number<kM0>{},
+                                                               number<kN0>{});
+                    if(need_perpixel_check)
+                    {
+                        auto apply_mask = [&](auto&& mask_func) {
+                            set_tile_if(
+                                s_acc, -numeric<SMPLComputeDataType>::infinity(), [&](auto tile_idx) {
+                                    const auto row =
+                                        q_origin.at(number<0>{}) + tile_idx.at(number<0>{});
+                                    const auto col =
+                                        k_origin.at(number<0>{}) + tile_idx.at(number<1>{});
+                                    return !mask_func(variant_params,
+                                                      block_indices.batch_idx,
+                                                      row,
+                                                      col,
+                                                      block_indices.qo_head_idx,
+                                                      block_indices.kv_head_idx);
+                                });
+                        };
 
-                    if constexpr(kHasSink)
-                    {
-                        apply_mask([&](auto&&... args) {
-                            return variant.LogitsSinkMask(std::forward<decltype(args)>(args)...);
-                        });
-                    }
-                    else
-                    {
-                        apply_mask([&](auto&&... args) {
-                            return variant.LogitsMask(std::forward<decltype(args)>(args)...);
-                        });
+                        if constexpr(kHasSink)
+                        {
+                            apply_mask([&](auto&&... args) {
+                                return variant.LogitsSinkMask(std::forward<decltype(args)>(args)...);
+                            });
+                        }
+                        else
+                        {
+                            apply_mask([&](auto&&... args) {
+                                return variant.LogitsMask(std::forward<decltype(args)>(args)...);
+                            });
+                        }
                     }
                 }
             }

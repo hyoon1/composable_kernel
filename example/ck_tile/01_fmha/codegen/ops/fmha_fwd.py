@@ -904,6 +904,19 @@ class CompatibilityRuleFactoryGfx950(CompatibilityRuleFactoryGfx9):
         return rules
 
 
+class CompatibilityRuleFactoryGfx12(CompatibilityRuleFactory):
+    @classmethod
+    def get_rules(cls) -> List[CompatibilityRule]:
+        rules = CompatibilityRuleFactory.get_rules()
+
+        # gfx12 does not execute trload pipelines (kUseTrLoad is unsupported); drop them early.
+        def check_trload(problem_ctx: ProblemContext, kernel_ctx: KernelContext) -> bool:
+            return kernel_ctx.pipeline.tag not in {"qr_async_trload", "qr_async_trload_v3"}
+
+        rules.append(check_trload)
+        return rules
+
+
 class KernelComponentFactoryGfx9(CompatibilityRuleFactoryGfx9):
     arch = ArchTrait(
         "gfx9", preprocessor_check="defined(__gfx9__) && !defined(__gfx950__)"
@@ -1099,7 +1112,7 @@ class KernelComponentFactoryGfx950(
         return pipelines
 
 
-class KernelComponentFactoryGfx12(CompatibilityRuleFactory):
+class KernelComponentFactoryGfx12(CompatibilityRuleFactoryGfx12):
     arch = ArchTrait("gfx12")
 
     _DT_FP16_BF16 = ("fp16", "bf16")
