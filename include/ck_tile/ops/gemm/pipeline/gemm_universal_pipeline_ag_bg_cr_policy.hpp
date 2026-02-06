@@ -11,72 +11,6 @@
 
 namespace ck_tile {
 
-// Simple 2D pass-through transform to mirror XOR arity when disabling swizzle.
-template <typename LowLengths>
-struct pass_through_2d : public base_transform<2, 2>
-{
-    static constexpr auto type_enum = coord_transform_enum::pass_through;
-
-    using LowerIndex = multi_index<2>;
-    using UpperIndex = multi_index<2>;
-    using UpLengths  = LowLengths;
-
-    UpLengths up_lengths_;
-
-    CK_TILE_HOST_DEVICE constexpr pass_through_2d() = default;
-
-    CK_TILE_HOST_DEVICE constexpr pass_through_2d(const LowLengths& low_lengths)
-        : up_lengths_{low_lengths}
-    {
-    }
-
-    CK_TILE_HOST_DEVICE static constexpr auto get_type_enum() { return type_enum; }
-
-    CK_TILE_HOST_DEVICE constexpr const auto& get_upper_lengths() const { return up_lengths_; }
-
-    template <typename LowIdx, typename UpIdx>
-    CK_TILE_HOST_DEVICE constexpr void calculate_lower_index(LowIdx& idx_low,
-                                                             const UpIdx& idx_up) const
-    {
-        static_assert(LowIdx::size() == 2 && UpIdx::size() == 2, "wrong! inconsistent # dim");
-        idx_low(number<0>{}) = idx_up[number<0>{}];
-        idx_low(number<1>{}) = idx_up[number<1>{}];
-    }
-
-    template <typename LowIdxDiff, typename UpIdxDiff, typename LowIdx, typename UpIdx>
-    CK_TILE_HOST_DEVICE constexpr void update_lower_index(LowIdxDiff& idx_diff_low,
-                                                          const UpIdxDiff& idx_diff_up,
-                                                          LowIdx& idx_low,
-                                                          const UpIdx&) const
-    {
-        static_assert(LowIdxDiff::size() == 2 && UpIdxDiff::size() == 2 && LowIdx::size() == 2 &&
-                          UpIdx::size() == 2,
-                      "wrong! inconsistent # dim");
-        idx_diff_low(number<0>{}) = idx_diff_up[number<0>{}];
-        idx_diff_low(number<1>{}) = idx_diff_up[number<1>{}];
-        idx_low += idx_diff_low;
-    }
-
-    CK_TILE_HOST_DEVICE static constexpr bool
-    is_valid_upper_index_always_mapped_to_valid_lower_index()
-    {
-        return true;
-    }
-
-    template <typename UpIdx>
-    CK_TILE_HOST_DEVICE static constexpr bool
-    is_valid_upper_index_mapped_to_valid_lower_index(const UpIdx&)
-    {
-        return true;
-    }
-};
-
-template <typename LowLengths>
-CK_TILE_HOST_DEVICE constexpr auto make_pass_through_transform_2d(const LowLengths& low_lengths)
-{
-    return pass_through_2d<LowLengths>{low_lengths};
-}
-
 template <typename T, typename = void>
 struct has_a_tile_access_pattern : std::false_type
 {
@@ -176,12 +110,6 @@ struct UniversalGemmBasePolicy
     {
         using ALayout               = remove_cvref_t<typename Problem::ALayout>;
         using ADataType             = OverrideADataType;
-        using WarpTile              = typename Problem::BlockGemmShape::WarpTile;
-        constexpr bool IsRdnaWmma = (WarpTile::at(number<0>{}) == 16 &&
-                                     WarpTile::at(number<1>{}) == 16 &&
-                                     WarpTile::at(number<2>{}) == 16) &&
-                                    (std::is_same_v<decltype(get_device_arch()), gfx11_t> ||
-                                     std::is_same_v<decltype(get_device_arch()), gfx12_t>);
         constexpr index_t MPerBlock = Problem::BlockGemmShape::kM;
         constexpr index_t KPerBlock = Problem::BlockGemmShape::kK;
         constexpr index_t KPack     = Derived::template GetSmemPackA<Problem>();
@@ -222,6 +150,7 @@ struct UniversalGemmBasePolicy
                 constexpr auto M1 = number<MPerBlock / M0>{};
 
                 // Get the warp tile size
+                using WarpTile         = typename Problem::BlockGemmShape::WarpTile;
                 constexpr auto MPerXdl = number<WarpTile::at(I0)>{};
 
                 // Number of threads covering K dimension
@@ -327,89 +256,42 @@ struct UniversalGemmBasePolicy
                 static_assert(NBanks == 32 || NBanks == 64, "Unexpected LDS bank count");
                 constexpr index_t RowMul = (NBanks == 64) ? 2 : 1;
 
-                if constexpr(IsRdnaWmma)
-                {
-                    // Old-CK-style padding: pad M stride by +KPack, no XOR swizzle.
-                    constexpr auto a_lds_block_desc_0 = make_naive_tensor_descriptor(
-                        make_tuple(number<KPerBlock / KPack * MLdsLayer>{},
-                                   number<MPerBlock / MLdsLayer>{},
-                                   number<KPack>{}),
-                        make_tuple(number<KPack>{},
-                                   number<KPerBlock * MLdsLayer + KPack>{},
-                                   number<1>{}),
-                        number<KPack>{},
-                        number<1>{});
+                constexpr auto a_lds_block_desc_0 = make_naive_tensor_descriptor(
+                    make_tuple(number<KPerBlock / KPack * MLdsLayer>{},
+                               number<MPerBlock / MLdsLayer>{},
+                               number<KPack>{}),
+                    make_tuple(number<KPack>{}, number<KPerBlock * MLdsLayer>{}, number<1>{}),
+                    number<KPack>{},
+                    number<1>{});
 
-                    constexpr auto a_lds_block_desc_permuted = transform_tensor_descriptor(
-                        a_lds_block_desc_0,
-                        make_tuple(make_pass_through_transform_2d(make_tuple(
-                                       number<MPerBlock / MLdsLayer * RowMul>{},
-                                       number<KPerBlock / KPack * MLdsLayer>{})),
-                                   make_pass_through_transform(number<KPack>{})),
-                        make_tuple(sequence<1, 0>{}, sequence<2>{}),
-                        make_tuple(sequence<1, 0>{}, sequence<2>{}));
+                constexpr auto a_lds_block_desc_permuted = transform_tensor_descriptor(
+                    a_lds_block_desc_0,
+                    make_tuple(
+                        make_xor_transform(make_tuple(number<MPerBlock / MLdsLayer * RowMul>{},
+                                                      number<KPerBlock / KPack * MLdsLayer>{})),
+                        make_pass_through_transform(number<KPack>{})),
+                    make_tuple(sequence<1, 0>{}, sequence<2>{}),
+                    make_tuple(sequence<1, 0>{}, sequence<2>{}));
 
-                    constexpr auto a_lds_block_desc_xk0_mnldslayer_mn_xk1 =
-                        transform_tensor_descriptor(
-                            a_lds_block_desc_permuted,
-                            make_tuple(make_unmerge_transform(make_tuple(
-                                           number<MLdsLayer>{}, number<KPerBlock / KPack>{})),
-                                       make_pass_through_transform(number<MPerBlock / MLdsLayer>{}),
-                                       make_pass_through_transform(number<KPack>{})),
-                            make_tuple(sequence<0>{}, sequence<1>{}, sequence<2>{}),
-                            make_tuple(sequence<0, 2>{}, sequence<1>{}, sequence<3>{}));
+                constexpr auto a_lds_block_desc_xk0_mnldslayer_mn_xk1 = transform_tensor_descriptor(
+                    a_lds_block_desc_permuted,
+                    make_tuple(make_unmerge_transform(
+                                   make_tuple(number<MLdsLayer>{}, number<KPerBlock / KPack>{})),
+                               make_pass_through_transform(number<MPerBlock / MLdsLayer>{}),
+                               make_pass_through_transform(number<KPack>{})),
+                    make_tuple(sequence<0>{}, sequence<1>{}, sequence<2>{}),
+                    make_tuple(sequence<0, 2>{}, sequence<1>{}, sequence<3>{}));
 
-                    constexpr auto a_lds_block_desc = transform_tensor_descriptor(
-                        a_lds_block_desc_xk0_mnldslayer_mn_xk1,
-                        make_tuple(make_merge_transform_v3_division_mod(make_tuple(
-                                       number<MPerBlock / MLdsLayer>{}, number<MLdsLayer>{})),
-                                   make_merge_transform_v3_division_mod(
-                                       make_tuple(number<KPerBlock / KPack>{}, number<KPack>{}))),
-                        make_tuple(sequence<1, 0>{}, sequence<2, 3>{}),
-                        make_tuple(sequence<0>{}, sequence<1>{}));
+                constexpr auto a_lds_block_desc = transform_tensor_descriptor(
+                    a_lds_block_desc_xk0_mnldslayer_mn_xk1,
+                    make_tuple(make_merge_transform_v3_division_mod(make_tuple(
+                                   number<MPerBlock / MLdsLayer>{}, number<MLdsLayer>{})),
+                               make_merge_transform_v3_division_mod(
+                                   make_tuple(number<KPerBlock / KPack>{}, number<KPack>{}))),
+                    make_tuple(sequence<1, 0>{}, sequence<2, 3>{}),
+                    make_tuple(sequence<0>{}, sequence<1>{}));
 
-                    return a_lds_block_desc;
-                }
-                else
-                {
-                    constexpr auto a_lds_block_desc_0 = make_naive_tensor_descriptor(
-                        make_tuple(number<KPerBlock / KPack * MLdsLayer>{},
-                                   number<MPerBlock / MLdsLayer>{},
-                                   number<KPack>{}),
-                        make_tuple(number<KPack>{}, number<KPerBlock * MLdsLayer>{}, number<1>{}),
-                        number<KPack>{},
-                        number<1>{});
-
-                    constexpr auto a_lds_block_desc_permuted = transform_tensor_descriptor(
-                        a_lds_block_desc_0,
-                        make_tuple(
-                            make_xor_transform(make_tuple(number<MPerBlock / MLdsLayer * RowMul>{},
-                                                          number<KPerBlock / KPack * MLdsLayer>{})),
-                            make_pass_through_transform(number<KPack>{})),
-                        make_tuple(sequence<1, 0>{}, sequence<2>{}),
-                        make_tuple(sequence<1, 0>{}, sequence<2>{}));
-
-                    constexpr auto a_lds_block_desc_xk0_mnldslayer_mn_xk1 =
-                        transform_tensor_descriptor(
-                            a_lds_block_desc_permuted,
-                            make_tuple(make_unmerge_transform(make_tuple(
-                                           number<MLdsLayer>{}, number<KPerBlock / KPack>{})),
-                                       make_pass_through_transform(number<MPerBlock / MLdsLayer>{}),
-                                       make_pass_through_transform(number<KPack>{})),
-                            make_tuple(sequence<0>{}, sequence<1>{}, sequence<2>{}),
-                            make_tuple(sequence<0, 2>{}, sequence<1>{}, sequence<3>{}));
-
-                    constexpr auto a_lds_block_desc = transform_tensor_descriptor(
-                        a_lds_block_desc_xk0_mnldslayer_mn_xk1,
-                        make_tuple(make_merge_transform_v3_division_mod(make_tuple(
-                                       number<MPerBlock / MLdsLayer>{}, number<MLdsLayer>{})),
-                                   make_merge_transform_v3_division_mod(
-                                       make_tuple(number<KPerBlock / KPack>{}, number<KPack>{}))),
-                        make_tuple(sequence<1, 0>{}, sequence<2, 3>{}),
-                        make_tuple(sequence<0>{}, sequence<1>{}));
-
-                    return a_lds_block_desc;
-                }
+                return a_lds_block_desc;
             }
         }
     }
@@ -428,12 +310,6 @@ struct UniversalGemmBasePolicy
             std::conditional_t<std::is_same_v<typename Problem::BDataType, pk_fp4_raw_t>,
                                typename Problem::ADataType,
                                typename Problem::BDataType>;
-        using WarpTile = typename Problem::BlockGemmShape::WarpTile;
-        constexpr bool IsRdnaWmma = (WarpTile::at(number<0>{}) == 16 &&
-                                     WarpTile::at(number<1>{}) == 16 &&
-                                     WarpTile::at(number<2>{}) == 16) &&
-                                    (std::is_same_v<decltype(get_device_arch()), gfx11_t> ||
-                                     std::is_same_v<decltype(get_device_arch()), gfx12_t>);
 
         constexpr index_t NPerBlock = Problem::BlockGemmShape::kN;
         constexpr index_t KPerBlock = Problem::BlockGemmShape::kK;
@@ -471,6 +347,7 @@ struct UniversalGemmBasePolicy
                 constexpr auto N1 = number<NPerBlock / N0>{};
 
                 // Get NPerXdl, the warp tile size
+                using WarpTile         = typename Problem::BlockGemmShape::WarpTile;
                 constexpr auto NPerXdl = number<WarpTile::at(I1)>{};
 
                 // Number of threads covering K dimension
@@ -579,88 +456,40 @@ struct UniversalGemmBasePolicy
                 static_assert(NBanks == 32 || NBanks == 64, "Unexpected LDS bank count");
                 constexpr index_t RowMul = (NBanks == 64) ? 2 : 1;
 
-                if constexpr(IsRdnaWmma)
-                {
-                    // Old-CK style: pad N stride by +KPack and drop XOR.
-                    constexpr auto b_lds_block_desc_0 = make_naive_tensor_descriptor(
-                        make_tuple(BK0 * number<NLdsLayer>{},
-                                   number<NPerBlock / NLdsLayer>{},
-                                   number<KPack>{}),
-                        make_tuple(number<KPack>{},
-                                   number<KPerBlock * NLdsLayer + KPack>{},
-                                   number<1>{}),
-                        number<KPack>{},
-                        number<1>{});
+                constexpr auto b_lds_block_desc_0 = make_naive_tensor_descriptor(
+                    make_tuple(BK0 * number<NLdsLayer>{},
+                               number<NPerBlock / NLdsLayer>{},
+                               number<KPack>{}),
+                    make_tuple(number<KPack>{}, number<KPerBlock * NLdsLayer>{}, number<1>{}),
+                    number<KPack>{},
+                    number<1>{});
 
-                    constexpr auto b_lds_block_desc_permuted = transform_tensor_descriptor(
-                        b_lds_block_desc_0,
-                        make_tuple(
-                            make_pass_through_transform_2d(make_tuple(
-                                number<NPerBlock / NLdsLayer * RowMul>{},
-                                BK0 * number<NLdsLayer>{})),
-                            make_pass_through_transform(number<KPack>{})),
-                        make_tuple(sequence<1, 0>{}, sequence<2>{}),
-                        make_tuple(sequence<1, 0>{}, sequence<2>{}));
+                constexpr auto b_lds_block_desc_permuted = transform_tensor_descriptor(
+                    b_lds_block_desc_0,
+                    make_tuple(
+                        make_xor_transform(make_tuple(number<NPerBlock / NLdsLayer * RowMul>{},
+                                                      BK0 * number<NLdsLayer>{})),
+                        make_pass_through_transform(number<KPack>{})),
+                    make_tuple(sequence<1, 0>{}, sequence<2>{}),
+                    make_tuple(sequence<1, 0>{}, sequence<2>{}));
 
-                    constexpr auto b_lds_block_desc_bk0_nldslayer_n_bk1 =
-                        transform_tensor_descriptor(
-                            b_lds_block_desc_permuted,
-                            make_tuple(make_unmerge_transform(make_tuple(number<NLdsLayer>{}, BK0)),
-                                       make_pass_through_transform(number<NPerBlock / NLdsLayer>{}),
-                                       make_pass_through_transform(number<KPack>{})),
-                            make_tuple(sequence<0>{}, sequence<1>{}, sequence<2>{}),
-                            make_tuple(sequence<0, 2>{}, sequence<1>{}, sequence<3>{}));
+                constexpr auto b_lds_block_desc_bk0_nldslayer_n_bk1 = transform_tensor_descriptor(
+                    b_lds_block_desc_permuted,
+                    make_tuple(make_unmerge_transform(make_tuple(number<NLdsLayer>{}, BK0)),
+                               make_pass_through_transform(number<NPerBlock / NLdsLayer>{}),
+                               make_pass_through_transform(number<KPack>{})),
+                    make_tuple(sequence<0>{}, sequence<1>{}, sequence<2>{}),
+                    make_tuple(sequence<0, 2>{}, sequence<1>{}, sequence<3>{}));
 
-                    constexpr auto b_lds_block_desc = transform_tensor_descriptor(
-                        b_lds_block_desc_bk0_nldslayer_n_bk1,
-                        make_tuple(
-                            make_merge_transform_v3_division_mod(
-                                make_tuple(number<NPerBlock / NLdsLayer>{}, number<NLdsLayer>{})),
-                            make_merge_transform_v3_division_mod(make_tuple(BK0, number<KPack>{}))),
-                        make_tuple(sequence<1, 0>{}, sequence<2, 3>{}),
-                        make_tuple(sequence<0>{}, sequence<1>{}));
-                    return b_lds_block_desc;
-                }
-                else
-                {
-                    constexpr auto b_lds_block_desc_0 = make_naive_tensor_descriptor(
-                        make_tuple(BK0 * number<NLdsLayer>{},
-                                   number<NPerBlock / NLdsLayer>{},
-                                   number<KPack>{}),
-                        make_tuple(number<KPack>{}, number<KPerBlock * NLdsLayer>{}, number<1>{}),
-                        number<KPack>{},
-                        number<1>{});
-
-                    constexpr auto b_lds_block_desc_permuted = transform_tensor_descriptor(
-                        b_lds_block_desc_0,
-                        make_tuple(
-                            make_xor_transform(make_tuple(number<NPerBlock / NLdsLayer * RowMul>{},
-                                                          BK0 * number<NLdsLayer>{})),
-                            make_pass_through_transform(number<KPack>{})),
-                        make_tuple(sequence<1, 0>{}, sequence<2>{}),
-                        make_tuple(sequence<1, 0>{}, sequence<2>{}));
-
-                    constexpr auto b_lds_block_desc_bk0_nldslayer_n_bk1 =
-                        transform_tensor_descriptor(
-                            b_lds_block_desc_permuted,
-                            make_tuple(make_unmerge_transform(make_tuple(number<NLdsLayer>{}, BK0)),
-                                       make_pass_through_transform(number<NPerBlock / NLdsLayer>{}),
-                                       make_pass_through_transform(number<KPack>{})),
-                            make_tuple(sequence<0>{}, sequence<1>{}, sequence<2>{}),
-                            make_tuple(sequence<0, 2>{}, sequence<1>{}, sequence<3>{}));
-
-                    constexpr auto b_lds_block_desc = transform_tensor_descriptor(
-                        b_lds_block_desc_bk0_nldslayer_n_bk1,
-                        make_tuple(make_merge_transform_v3_division_mod(
-                                       make_tuple(number<NPerBlock / NLdsLayer>{},
-                                                  number<NLdsLayer>{})),
-                                   make_merge_transform_v3_division_mod(make_tuple(
-                                       BK0, number<KPack>{}))),
-                        make_tuple(sequence<1, 0>{}, sequence<2, 3>{}),
-                        make_tuple(sequence<0>{}, sequence<1>{}));
-                    return b_lds_block_desc;
-                }
-
+                constexpr auto b_lds_block_desc = transform_tensor_descriptor(
+                    b_lds_block_desc_bk0_nldslayer_n_bk1,
+                    make_tuple(
+                        make_merge_transform_v3_division_mod(
+                            make_tuple(number<NPerBlock / NLdsLayer>{}, number<NLdsLayer>{})),
+                        make_merge_transform_v3_division_mod(make_tuple(BK0, number<KPack>{}))),
+                    make_tuple(sequence<1, 0>{}, sequence<2, 3>{}),
+                    make_tuple(sequence<0>{}, sequence<1>{}));
+                return b_lds_block_desc;
             }
         }
     }
