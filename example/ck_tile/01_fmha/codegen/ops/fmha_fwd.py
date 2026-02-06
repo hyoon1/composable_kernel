@@ -1235,7 +1235,26 @@ class KernelComponentFactoryGfx11(KernelComponentFactoryGfx9):
                 "f",
                 "f",
                 "f",
-            )
+            ),
+            # Padding-enabled variant: required when seqlen_q or seqlen_k isn't divisible by tile.
+            # Must come after the no-pad kernel so dispatch prefers the faster path when possible.
+            FmhaFwdPipeline(
+                "qr",
+                "row",
+                "t",
+                "t",
+                "f",
+                "f",
+                "f",
+                "no",
+                "f",
+                "f",
+                "no",
+                mask_no,
+                "f",
+                "f",
+                "f",
+            ),
         ]
 
 
