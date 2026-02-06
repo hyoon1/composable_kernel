@@ -1218,20 +1218,27 @@ struct FmhaFwdKernel
 
     CK_TILE_HOST static dim3 BlockSize()
     {
-        if(is_wave32())
+        // kBlockSize is already built from the compiler target's warp size. Only shrink the launch
+        // when a wave64-compiled binary runs in wave32 mode at runtime; otherwise keep the
+        // compile-time size.
+        if(is_wave32() && get_warp_size() == 64)
         {
             return dim3(kBlockSize / 2);
         }
-        else
-        {
-            return dim3(kBlockSize);
-        }
+        return dim3(kBlockSize);
     }
 
-    CK_TILE_HOST_DEVICE static constexpr ck_tile::index_t GetSmemSize()
+#if defined(__HIP_DEVICE_COMPILE__)
+    CK_TILE_DEVICE static constexpr ck_tile::index_t GetSmemSize()
     {
         return ck_tile::max(FmhaPipeline::GetSmemSize(), EpiloguePipeline::GetSmemSize());
     }
+#else
+    CK_TILE_HOST static constexpr ck_tile::index_t GetSmemSize()
+    {
+        return ck_tile::max(FmhaPipeline::GetSmemSize(), EpiloguePipeline::GetSmemSize());
+    }
+#endif
 
     CK_TILE_DEVICE void operator()(Kargs kargs) const
     {

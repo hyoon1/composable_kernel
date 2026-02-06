@@ -2,10 +2,10 @@
 # SPDX-License-Identifier: MIT
 
 set(INST_TARGETS ${SUPPORTED_GPU_TARGETS})
-# Currently only gfx9 and gfx12 archs are supported by FMHA
-list(FILTER INST_TARGETS INCLUDE REGEX "gfx9|gfx12")
+# Currently gfx9, gfx11, and gfx12 archs are supported by FMHA
+list(FILTER INST_TARGETS INCLUDE REGEX "gfx9|gfx11|gfx12")
 if(NOT INST_TARGETS)
-  message(WARNING "Skipping Tile Engine FMHA compilation: No supported GPU targets (gfx9, gfx12) found in SUPPORTED_GPU_TARGETS: ${SUPPORTED_GPU_TARGETS}")
+  message(WARNING "Skipping Tile Engine FMHA compilation: No supported GPU targets (gfx9, gfx11, gfx12) found in SUPPORTED_GPU_TARGETS: ${SUPPORTED_GPU_TARGETS}")
   return()
 endif()
 
@@ -58,6 +58,13 @@ set(FMHA_BWD_CODE_GEN_COMMON_ARGS
   --optdim 32,64,96,128,256
   # --filter fmha_bwd_dot...@fmha_bwd_convert...@fmha_bwd...
 )
+
+# gfx11: prefer accuracy by default; fast exp2 also enables FTZ which can hurt numerics.
+if(FMHA_TARGETS_ARG MATCHES "gfx11")
+  if(NOT DEFINED FMHA_FWD_FAST_EXP2)
+    set(FMHA_FWD_FAST_EXP2 OFF)
+  endif()
+endif()
 
 # Reduce building time by disabling instances that are not currently used in the gtests
 # TODO: Consider to use a special receipt for testing only, or even two receipts: a small subset of
@@ -148,8 +155,10 @@ endif()
 
 if(FMHA_FWD_FAST_EXP2)
   list(APPEND FMHA_FWD_PRIVATE_COMPILE_OPTIONS -DCK_TILE_FMHA_FWD_FAST_EXP2=1 -fgpu-flush-denormals-to-zero)
+  list(APPEND FMHA_FWD_INTERFACE_COMPILE_OPTIONS -DCK_TILE_FMHA_FWD_FAST_EXP2=1)
 else()
   list(APPEND FMHA_FWD_PRIVATE_COMPILE_OPTIONS -DCK_TILE_FMHA_FWD_FAST_EXP2=0)
+  list(APPEND FMHA_FWD_INTERFACE_COMPILE_OPTIONS -DCK_TILE_FMHA_FWD_FAST_EXP2=0)
 endif()
 list(APPEND FMHA_BWD_PRIVATE_COMPILE_OPTIONS -fgpu-flush-denormals-to-zero)
 

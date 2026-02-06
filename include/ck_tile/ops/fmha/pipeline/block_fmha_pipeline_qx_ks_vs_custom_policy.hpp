@@ -337,7 +337,6 @@ struct BlockFmhaPipelineQXKSVSCustomPolicy : BlockFmhaPipelineQXCustomPolicy<QLo
     template <typename Problem>
     CK_TILE_HOST_DEVICE static constexpr auto GetSmemKPackK()
     {
-        // TODO: this is for 3d layout
         using KDataType = remove_cvref_t<typename Problem::KDataType>;
         return 16 / sizeof(KDataType);
     }
@@ -501,10 +500,13 @@ struct BlockFmhaPipelineQXKSVSCustomPolicy : BlockFmhaPipelineQXCustomPolicy<QLo
         constexpr index_t kNPerBlock = Problem::BlockFmhaShape::kN0;
         constexpr index_t kKPerBlock = Problem::BlockFmhaShape::kK0;
         constexpr index_t kKPack     = GetSmemKPackK<Problem>();
+        // gfx11 wave32 does not require the +1 padding on K; keeping the extra column introduces
+        // a stride mismatch when the tile is reloaded for WMMA.
+        constexpr index_t n_stride = (get_warp_size() == 32) ? kNPerBlock : (kNPerBlock + 1);
 
         constexpr auto k_lds_block_desc_0 = make_naive_tensor_descriptor(
             make_tuple(number<kKPerBlock / kKPack>{}, number<kNPerBlock>{}, number<kKPack>{}),
-            make_tuple(number<(kNPerBlock + 1) * kKPack>{}, number<kKPack>{}, number<1>{}),
+            make_tuple(number<n_stride * kKPack>{}, number<kKPack>{}, number<1>{}),
             number<kKPack>{},
             number<1>{});
 
@@ -681,15 +683,42 @@ struct BlockFmhaPipelineQXKSVSCustomPolicy : BlockFmhaPipelineQXCustomPolicy<QLo
     }
 
     template <typename Problem>
-    CK_TILE_HOST_DEVICE static constexpr ck_tile::index_t GetSmemSize()
+    CK_TILE_HOST_DEVICE static constexpr ck_tile::index_t GetSmemSizePRemap()
     {
-        if constexpr(AsyncCopy)
+        if constexpr(get_warp_size() == 32)
         {
-            return GetSmemSizeKV<Problem>() + GetSmemSizeDropout<Problem>(0);
+            constexpr index_t align_bytes = 16;
+            constexpr index_t bytes =
+                Problem::BlockFmhaShape::kM0 * Problem::BlockFmhaShape::kN0 *
+                sizeof(typename Problem::PDataType);
+            return ck_tile::integer_divide_ceil(bytes, align_bytes) * align_bytes;
         }
         else
         {
-            return ck_tile::max(GetSmemSizeKV<Problem>(), GetSmemSizeDropout<Problem>(0));
+            return 0;
+        }
+    }
+
+    template <typename Problem>
+    CK_TILE_HOST_DEVICE static constexpr ck_tile::index_t GetSmemOffsetPRemap()
+    {
+        constexpr index_t align_bytes = alignof(typename Problem::PDataType);
+        return ck_tile::integer_divide_ceil(GetSmemSizeKV<Problem>(), align_bytes) * align_bytes;
+    }
+
+    template <typename Problem>
+    CK_TILE_HOST_DEVICE static constexpr ck_tile::index_t GetSmemSize()
+    {
+        constexpr index_t p_remap_offset = GetSmemOffsetPRemap<Problem>();
+        constexpr index_t p_remap_size   = GetSmemSizePRemap<Problem>();
+        if constexpr(AsyncCopy)
+        {
+            return p_remap_offset + p_remap_size + GetSmemSizeDropout<Problem>(0);
+        }
+        else
+        {
+            return ck_tile::max(p_remap_offset + p_remap_size,
+                                GetSmemSizeDropout<Problem>(0));
         }
     }
 
@@ -994,6 +1023,8 @@ struct BlockFmhaPipelineQXKSVSCustomPolicy : BlockFmhaPipelineQXCustomPolicy<QLo
             }
             else
             {
+                // WMMA path (gfx11/12) needs transposed C distribution to map accumulators back
+                // to the expected block layout.
                 return WarpGemmDispatcher<typename Problem::PDataType,
                                           typename Problem::VDataType,
                                           typename Problem::OaccDataType,

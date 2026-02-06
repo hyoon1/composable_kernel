@@ -16,7 +16,9 @@ struct WmmaTraits<gfx11_t, fp16_t, fp16_t, float, 16, 16, 16>
     CK_TILE_DEVICE static CVecType
     wmma_intrinsic(const AVecType& a_vec, const BVecType& b_vec, const CVecType& c_vec)
     {
-#ifdef __gfx11__
+#if defined(__gfx11__) || defined(__gfx1100__) || defined(__gfx1101__) || defined(__gfx1102__) || \
+    defined(__gfx1103__) || defined(__gfx1150__) || defined(__gfx1151__) || defined(__gfx1152__) || \
+    defined(__gfx1153__) || __has_builtin(__builtin_amdgcn_wmma_f32_16x16x16_f16_w32)
         return __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a_vec, b_vec, c_vec);
 #else
         ck_tile::ignore = a_vec;
@@ -38,7 +40,9 @@ struct WmmaTraits<gfx11_t, bf16_t, bf16_t, float, 16, 16, 16>
     CK_TILE_DEVICE static CVecType
     wmma_intrinsic(const AVecType& a_vec, const BVecType& b_vec, const CVecType& c_vec)
     {
-#ifdef __gfx11__
+#if defined(__gfx11__) || defined(__gfx1100__) || defined(__gfx1101__) || defined(__gfx1102__) || \
+    defined(__gfx1103__) || defined(__gfx1150__) || defined(__gfx1151__) || defined(__gfx1152__) || \
+    defined(__gfx1153__) || __has_builtin(__builtin_amdgcn_wmma_f32_16x16x16_bf16_w32)
         return __builtin_amdgcn_wmma_f32_16x16x16_bf16_w32(a_vec, b_vec, c_vec);
 #else
         ck_tile::ignore = a_vec;
@@ -60,7 +64,8 @@ struct WmmaTraits<gfx12_t, fp16_t, fp16_t, float, 16, 16, 16>
     CK_TILE_DEVICE static CVecType
     wmma_intrinsic(const AVecType& a_vec, const BVecType& b_vec, const CVecType& c_vec)
     {
-#ifdef __gfx12__
+#if defined(__gfx12__) || defined(__gfx1200__) || defined(__gfx1201__) || defined(__gfx1250__) || \
+    __has_builtin(__builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12)
         return __builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12(a_vec, b_vec, c_vec);
 #else
         ck_tile::ignore = a_vec;
@@ -82,7 +87,8 @@ struct WmmaTraits<gfx12_t, bf16_t, bf16_t, float, 16, 16, 16>
     CK_TILE_DEVICE static CVecType
     wmma_intrinsic(const AVecType& a_vec, const BVecType& b_vec, const CVecType& c_vec)
     {
-#ifdef __gfx12__
+#if defined(__gfx12__) || defined(__gfx1200__) || defined(__gfx1201__) || defined(__gfx1250__) || \
+    __has_builtin(__builtin_amdgcn_wmma_f32_16x16x16_bf16_w32_gfx12)
         return __builtin_amdgcn_wmma_f32_16x16x16_bf16_w32_gfx12(a_vec, b_vec, c_vec);
 #else
         ck_tile::ignore = a_vec;

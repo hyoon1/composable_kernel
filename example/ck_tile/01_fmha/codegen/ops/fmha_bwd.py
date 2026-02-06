@@ -475,6 +475,17 @@ class KernelComponentFactoryGfx12(KernelComponentFactoryBase):
         return []
 
 
+class KernelComponentFactoryGfx11(KernelComponentFactoryGfx9):
+    arch = ArchTrait("gfx11")
+
+    @staticmethod
+    def get_dq_dk_dv_tiles(dtype: str, tr_load: str) -> List[FmhaBwdDQDKDVTileSize]:
+        # gfx11 supports fp16/bf16 only; reuse gfx9 tiling rules.
+        if dtype in ["fp16", "bf16"]:
+            return KernelComponentFactoryGfx9.get_dq_dk_dv_tiles(dtype, tr_load)
+        return []
+
+
 def get_factory(target: str):
     # Place more specific architectures first
 
@@ -482,6 +493,9 @@ def get_factory(target: str):
         return KernelComponentFactoryGfx950
     if target.startswith("gfx9"):
         return KernelComponentFactoryGfx9
+
+    if target.startswith("gfx11"):
+        return KernelComponentFactoryGfx11
 
     if target.startswith("gfx12"):
         return KernelComponentFactoryGfx12

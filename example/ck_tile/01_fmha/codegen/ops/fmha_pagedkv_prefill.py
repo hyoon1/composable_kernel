@@ -622,11 +622,37 @@ class KernelComponentFactoryGfx12(KernelComponentFactoryBase):
             return None
 
 
+class KernelComponentFactoryGfx11(KernelComponentFactoryGfx9):
+    arch = ArchTrait("gfx11")
+
+    @staticmethod
+    def get_hdim_tile_size_dict(dtype: str) -> Optional[dict]:
+        # gfx11 supports fp16/bf16 only; reuse gfx9 tiling rules.
+        if dtype in ["fp16", "bf16"]:
+            return KernelComponentFactoryGfx9.get_hdim_tile_size_dict(dtype)
+        return None
+
+    @staticmethod
+    def get_pipelines(dtype: str, hdim: int, mask_impl: str) -> List[FmhaFwdPipeline]:
+        if dtype not in ["fp16", "bf16"]:
+            return []
+
+        pipelines = KernelComponentFactoryGfx9.get_pipelines(dtype, hdim, mask_impl)
+        return [
+            p
+            for p in pipelines
+            if getattr(p, "F_dropout", "f") == "f" and not p.tag.startswith("qr_async")
+        ]
+
+
 def get_factory(target: str):
     # Place more specific architectures first
 
     if target.startswith("gfx9"):
         return KernelComponentFactoryGfx9
+
+    if target.startswith("gfx11"):
+        return KernelComponentFactoryGfx11
 
     if target.startswith("gfx12"):
         return KernelComponentFactoryGfx12

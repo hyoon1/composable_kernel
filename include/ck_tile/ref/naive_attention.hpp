@@ -499,6 +499,9 @@ struct naive_attention_fwd_kernel
             int i_sk = i_loop1 * wg_size + threadIdx.x;
             // gemm-1
             SoftmaxType s_softmax = -numeric<SoftmaxType>::infinity();
+            constexpr bool kUseFastExp2 =
+                CK_TILE_FMHA_FWD_FAST_EXP2 && (ck_tile::get_warp_size() != 32);
+
             if(i_sk < seqlen_kv)
             {
                 AccType s_acc{0}; // clear for every loop
@@ -521,8 +524,15 @@ struct naive_attention_fwd_kernel
                 }
                 // scale
                 s_softmax = type_convert<SoftmaxType>(s_acc);
-                s_softmax *=
-                    type_convert<SoftmaxType>(args.scale_s * ck_tile::log2e_v<SoftmaxType>);
+                if constexpr(kUseFastExp2)
+                {
+                    s_softmax *=
+                        type_convert<SoftmaxType>(args.scale_s * ck_tile::log2e_v<SoftmaxType>);
+                }
+                else
+                {
+                    s_softmax *= type_convert<SoftmaxType>(args.scale_s);
+                }
                 if constexpr(Traits::quant_algo == naive_attention_quant_algo::KV_8BIT_PERHEAD)
                 {
                     s_softmax *= q_dequant_scale; // post scale the per-token factor
@@ -547,14 +557,32 @@ struct naive_attention_fwd_kernel
                 cur_max = cross_wave_reduce(cur_max, f_max, reinterpret_cast<SoftmaxType*>(smem));
                 row_max = max(old_max, cur_max); // update row_max
                 // softmax, exp(i_elem - max)
-                SoftmaxType p_compute = __builtin_amdgcn_exp2f(s_softmax - row_max);
+                SoftmaxType p_compute = [&]() {
+                    if constexpr(kUseFastExp2)
+                    {
+                        return __builtin_amdgcn_exp2f(s_softmax - row_max);
+                    }
+                    else
+                    {
+                        return ck_tile::exp(s_softmax - row_max);
+                    }
+                }();
 
                 // compute exp_sum
                 SoftmaxType row_sum = wave_reduce(p_compute, f_sum);
                 row_sum = cross_wave_reduce(row_sum, f_sum, reinterpret_cast<SoftmaxType*>(smem));
 
                 // l, pre-scall o_acc
-                SoftmaxType tmp = __builtin_amdgcn_exp2f(old_max - row_max);
+                SoftmaxType tmp = [&]() {
+                    if constexpr(kUseFastExp2)
+                    {
+                        return __builtin_amdgcn_exp2f(old_max - row_max);
+                    }
+                    else
+                    {
+                        return ck_tile::exp(old_max - row_max);
+                    }
+                }();
                 l               = tmp * l + row_sum;
                 o_acc           = type_convert<OAccType>(type_convert<SoftmaxType>(o_acc) * tmp);
 

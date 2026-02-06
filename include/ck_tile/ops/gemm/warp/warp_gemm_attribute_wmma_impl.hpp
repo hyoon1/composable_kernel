@@ -5,6 +5,7 @@
 
 #include "ck_tile/core.hpp"
 #include "ck_tile/core/config.hpp"
+#include "ck_tile/core/arch/utility.hpp"
 
 namespace ck_tile {
 
@@ -23,6 +24,7 @@ template <typename Traits>
 struct WarpGemmAttributeWmmaImpl
 {
     using TraitsType = Traits;
+    using ArchType   = typename Traits::ArchType;
     using ADataType  = typename Traits::ADataType;
     using BDataType  = typename Traits::BDataType;
     using CDataType  = typename Traits::CDataType;
@@ -73,27 +75,50 @@ struct WarpGemmAttributeWmmaImpl
                                    const BVecType& b_vec,
                                    bool_constant<post_nop_> = {}) const
     {
-        c_vec = Traits::template wmma_intrinsic<clamp>(a_vec, b_vec, c_vec);
+        const auto a_use = duplicate_if_gfx11(a_vec);
+        const auto b_use = duplicate_if_gfx11(b_vec);
+        c_vec            = Traits::template wmma_intrinsic<clamp>(a_use, b_use, c_vec);
     }
 
     // c_vec = a_vec * b_vec
     template <bool clamp = false>
     CK_TILE_DEVICE CVecType operator()(const AVecType& a_vec, const BVecType& b_vec) const
     {
+        const auto a_use = duplicate_if_gfx11(a_vec);
+        const auto b_use = duplicate_if_gfx11(b_vec);
         return bit_cast<CVecType>(
-            Traits::template wmma_intrinsic<clamp>(a_vec, b_vec, CVecType{0.f}));
+            Traits::template wmma_intrinsic<clamp>(a_use, b_use, CVecType{0.f}));
+    }
+
+    template <typename Vec>
+    CK_TILE_DEVICE static Vec duplicate_if_gfx11(const Vec& v)
+    {
+        return v;
     }
 };
 
-using DeviceIp = remove_cvref_t<decltype(ck_tile::get_device_arch())>;
+#if defined(__gfx11__)
 using WarpGemmAttributeWmmaImpl_f32_16x16x16_f16_f16 =
-    WarpGemmAttributeWmmaImpl<WmmaTraits<DeviceIp, fp16_t, fp16_t, float, 16, 16, 16>>;
-
+    WarpGemmAttributeWmmaImpl<WmmaTraits<gfx11_t, fp16_t, fp16_t, float, 16, 16, 16>>;
 using WarpGemmAttributeWmmaImpl_f32_16x16x16_bf16_bf16 =
-    WarpGemmAttributeWmmaImpl<WmmaTraits<DeviceIp, bf16_t, bf16_t, float, 16, 16, 16>>;
-
+    WarpGemmAttributeWmmaImpl<WmmaTraits<gfx11_t, bf16_t, bf16_t, float, 16, 16, 16>>;
 using WarpGemmAttributeWmmaImpl_i32_16x16x16_i8_i8 =
-    WarpGemmAttributeWmmaImpl<WmmaTraits<DeviceIp, int8_t, int8_t, int32_t, 16, 16, 16>>;
+    WarpGemmAttributeWmmaImpl<WmmaTraits<gfx11_t, int8_t, int8_t, int32_t, 16, 16, 16>>;
+#elif defined(__gfx12__)
+using WarpGemmAttributeWmmaImpl_f32_16x16x16_f16_f16 =
+    WarpGemmAttributeWmmaImpl<WmmaTraits<gfx12_t, fp16_t, fp16_t, float, 16, 16, 16>>;
+using WarpGemmAttributeWmmaImpl_f32_16x16x16_bf16_bf16 =
+    WarpGemmAttributeWmmaImpl<WmmaTraits<gfx12_t, bf16_t, bf16_t, float, 16, 16, 16>>;
+using WarpGemmAttributeWmmaImpl_i32_16x16x16_i8_i8 =
+    WarpGemmAttributeWmmaImpl<WmmaTraits<gfx12_t, int8_t, int8_t, int32_t, 16, 16, 16>>;
+#else
+using WarpGemmAttributeWmmaImpl_f32_16x16x16_f16_f16 =
+    WarpGemmAttributeWmmaImpl<WmmaTraits<gfx11_t, fp16_t, fp16_t, float, 16, 16, 16>>;
+using WarpGemmAttributeWmmaImpl_f32_16x16x16_bf16_bf16 =
+    WarpGemmAttributeWmmaImpl<WmmaTraits<gfx11_t, bf16_t, bf16_t, float, 16, 16, 16>>;
+using WarpGemmAttributeWmmaImpl_i32_16x16x16_i8_i8 =
+    WarpGemmAttributeWmmaImpl<WmmaTraits<gfx11_t, int8_t, int8_t, int32_t, 16, 16, 16>>;
+#endif
 
 using WarpGemmAttributeWmmaImpl_f32_16x16x16_f8_f8 =
     WarpGemmAttributeWmmaImpl<WmmaTraits<gfx12_t, fp8_t, fp8_t, float, 16, 16, 16>>;
