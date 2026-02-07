@@ -501,10 +501,17 @@ struct BlockFmhaPipelineQXKSVSCustomPolicy : BlockFmhaPipelineQXCustomPolicy<QLo
         constexpr index_t kNPerBlock = Problem::BlockFmhaShape::kN0;
         constexpr index_t kKPerBlock = Problem::BlockFmhaShape::kK0;
         constexpr index_t kKPack     = GetSmemKPackK<Problem>();
+// gfx11 does not require the +1 padding on K; keeping the extra column introduces a stride mismatch
+// when the tile is reloaded for WMMA.
+#if defined(__gfx11__)
+        constexpr index_t n_stride = kNPerBlock;
+#else
+        constexpr index_t n_stride = kNPerBlock + 1;
+#endif
 
         constexpr auto k_lds_block_desc_0 = make_naive_tensor_descriptor(
             make_tuple(number<kKPerBlock / kKPack>{}, number<kNPerBlock>{}, number<kKPack>{}),
-            make_tuple(number<(kNPerBlock + 1) * kKPack>{}, number<kKPack>{}, number<1>{}),
+            make_tuple(number<n_stride * kKPack>{}, number<kKPack>{}, number<1>{}),
             number<kKPack>{},
             number<1>{});
 
@@ -681,8 +688,44 @@ struct BlockFmhaPipelineQXKSVSCustomPolicy : BlockFmhaPipelineQXCustomPolicy<QLo
     }
 
     template <typename Problem>
+    CK_TILE_HOST_DEVICE static constexpr ck_tile::index_t GetSmemSizePRemap()
+    {
+#if defined(__gfx11__)
+        constexpr index_t align_bytes = 16;
+        constexpr index_t bytes = Problem::BlockFmhaShape::kM0 * Problem::BlockFmhaShape::kN0 *
+                                  sizeof(typename Problem::PDataType);
+        return ck_tile::integer_divide_ceil(bytes, align_bytes) * align_bytes;
+#else
+        return 0;
+#endif
+    }
+
+    template <typename Problem>
+    CK_TILE_HOST_DEVICE static constexpr ck_tile::index_t GetSmemOffsetPRemap()
+    {
+#if defined(__gfx11__)
+        constexpr index_t align_bytes = alignof(typename Problem::PDataType);
+        return ck_tile::integer_divide_ceil(GetSmemSizeKV<Problem>(), align_bytes) * align_bytes;
+#else
+        return 0;
+#endif
+    }
+
+    template <typename Problem>
     CK_TILE_HOST_DEVICE static constexpr ck_tile::index_t GetSmemSize()
     {
+#if defined(__gfx11__)
+        constexpr index_t p_remap_offset = GetSmemOffsetPRemap<Problem>();
+        constexpr index_t p_remap_size   = GetSmemSizePRemap<Problem>();
+        if constexpr(AsyncCopy)
+        {
+            return p_remap_offset + p_remap_size + GetSmemSizeDropout<Problem>(0);
+        }
+        else
+        {
+            return ck_tile::max(p_remap_offset + p_remap_size, GetSmemSizeDropout<Problem>(0));
+        }
+#else
         if constexpr(AsyncCopy)
         {
             return GetSmemSizeKV<Problem>() + GetSmemSizeDropout<Problem>(0);
@@ -691,6 +734,7 @@ struct BlockFmhaPipelineQXKSVSCustomPolicy : BlockFmhaPipelineQXCustomPolicy<QLo
         {
             return ck_tile::max(GetSmemSizeKV<Problem>(), GetSmemSizeDropout<Problem>(0));
         }
+#endif
     }
 
     // this method is only available when Problem::kHasDropout is present
@@ -994,6 +1038,8 @@ struct BlockFmhaPipelineQXKSVSCustomPolicy : BlockFmhaPipelineQXCustomPolicy<QLo
             }
             else
             {
+                // WMMA path (gfx11/12) needs transposed C distribution to map accumulators back
+                // to the expected block layout.
                 return WarpGemmDispatcher<typename Problem::PDataType,
                                           typename Problem::VDataType,
                                           typename Problem::OaccDataType,
