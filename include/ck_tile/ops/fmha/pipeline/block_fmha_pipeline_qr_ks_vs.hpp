@@ -477,7 +477,17 @@ struct BlockFmhaPipelineQRKSVS
                 s_acc = tile_elementwise_in(s_acc_element_func_, s_acc);
                 tile_elementwise_inout([&scale_s](auto& x) { x = x * scale_s; }, s_acc);
                 tile_elementwise_inout(
-                    [&](auto& x, const auto& y) { x += type_convert<SaccDataType>(bias_element_func(y)); },
+                    [&](auto& x, const auto& y) {
+                        if constexpr(kUseFastExp2)
+                        {
+                            x += log2e_v<SaccDataType> *
+                                 type_convert<SaccDataType>(bias_element_func(y));
+                        }
+                        else
+                        {
+                            x += type_convert<SaccDataType>(bias_element_func(y));
+                        }
+                    },
                     s_acc,
                     bias_tile);
             }
@@ -517,12 +527,11 @@ struct BlockFmhaPipelineQRKSVS
                 }
                 else
                 {
-                    tile_elementwise_inout([&scale_s](auto& x) { x = x * scale_s; }, s_acc);
+                    if constexpr(!kUseFastExp2)
+                    {
+                        tile_elementwise_inout([&scale_s](auto& x) { x = x * scale_s; }, s_acc);
+                    }
                 }
-            }
-            if constexpr(kUseFastExp2)
-            {
-                tile_elementwise_inout([](auto& x) { x = x * log2e_v<SaccDataType>; }, s_acc);
             }
             if constexpr(kHasSink)
             {
@@ -613,8 +622,11 @@ struct BlockFmhaPipelineQRKSVS
                 constexpr auto i_idx = make_tuple(idx0);
                 if constexpr(kUseFastExp2)
                 {
+                    // For BLOCKSCALE: precompute (m - shift) once per row
+                    // Bias/Alibi/SoftCap: exp2(s - m + shift) = exp2(s - (m - shift))
+                    // else: exp2(scale_s*s - scale_s*m + shift) = exp2(scale_s*s - (scale_s*m - shift))
                     auto validated_m = get_validated_m(m[i_idx]);
-                    auto row_max     = validated_m;
+                    auto row_max     = scale_s * validated_m;
                     if constexpr(QScaleEnum == BlockAttentionQuantScaleEnum::BLOCKSCALE)
                     {
 #if CK_TILE_USE_OCP_FP8
@@ -640,7 +652,7 @@ struct BlockFmhaPipelineQRKSVS
                             }
                             else
                             {
-                                p_compute(i_j_idx) = exp2(s[i_j_idx] - row_max);
+                                p_compute(i_j_idx) = exp2(scale_s * s[i_j_idx] - row_max);
                             }
                         }
                     });
@@ -686,8 +698,8 @@ struct BlockFmhaPipelineQRKSVS
                             }
                             else
                             {
-                                auto row_max = get_validated_m(m[i_idx]);
-                                return exp2(m_old[i_idx] - row_max);
+                                auto row_max = scale_s * get_validated_m(m[i_idx]);
+                                return exp2(scale_s * m_old[i_idx] - row_max);
                             }
                         }
                     }
