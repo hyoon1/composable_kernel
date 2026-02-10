@@ -608,6 +608,18 @@ template <typename FmhaKernel>
 auto fmha_fwd_create_kargs_and_grids(fmha_fwd_args args)
 {
     assert(args.nhead_q % args.nhead_k == 0);
+    // gfx11 kernels force natural exp even when CK_TILE_FMHA_FWD_FAST_EXP2 is enabled.
+    // Compensate for the kernel-side karg scaling (scale_s *= log2e) so gfx11 receives the
+    // original "natural" scale.
+    const float scale_s = [&] {
+#if CK_TILE_FMHA_FWD_FAST_EXP2
+        if(ck_tile::is_gfx11_supported())
+        {
+            return static_cast<float>(args.scale_s / ck_tile::log2e_v<>);
+        }
+#endif
+        return args.scale_s;
+    }();
     auto kargs = [&] {
         // create group mode kernel arguments
         if constexpr(FmhaKernel::kIsGroupMode)
@@ -632,7 +644,7 @@ auto fmha_fwd_create_kargs_and_grids(fmha_fwd_args args)
                                              args.hdim_v,
                                              args.nhead_q,
                                              args.nhead_q / args.nhead_k,
-                                             args.scale_s,
+                                             scale_s,
                                              args.logits_soft_cap,
                                              args.stride_q,
                                              args.stride_k,
@@ -682,7 +694,7 @@ auto fmha_fwd_create_kargs_and_grids(fmha_fwd_args args)
                                              args.hdim_v,
                                              args.nhead_q,
                                              args.nhead_q / args.nhead_k,
-                                             args.scale_s,
+                                             scale_s,
                                              args.logits_soft_cap,
                                              args.stride_q,
                                              args.stride_k,

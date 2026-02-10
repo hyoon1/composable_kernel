@@ -64,7 +64,9 @@ set(FMHA_BWD_CODE_GEN_COMMON_ARGS
 )
 
 # gfx11: prefer accuracy by default; fast exp2 also enables FTZ which can hurt numerics.
-if(FMHA_TARGETS_ARG MATCHES "gfx11")
+# If we're building only gfx11 targets, default to OFF. For multi-target builds (e.g. gfx11+gfx12),
+# keep the default so gfx12 retains the fast path; gfx11 kernels disable fast exp2 internally.
+if(FMHA_TARGETS_ARG MATCHES "gfx11" AND NOT (FMHA_TARGETS_ARG MATCHES "gfx9" OR FMHA_TARGETS_ARG MATCHES "gfx12"))
   if(NOT DEFINED FMHA_FWD_FAST_EXP2)
     set(FMHA_FWD_FAST_EXP2 OFF)
   endif()
