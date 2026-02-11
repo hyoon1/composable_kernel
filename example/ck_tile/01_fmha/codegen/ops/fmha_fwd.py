@@ -1194,6 +1194,67 @@ class KernelComponentFactoryGfx12(CompatibilityRuleFactoryGfx12):
         return pipelines
 
 
+class KernelComponentFactoryGfx11(CompatibilityRuleFactory):
+    arch = ArchTrait("gfx11")
+
+    _DT_FP16_BF16 = ("fp16", "bf16")
+
+    @classmethod
+    def get_rules(cls) -> List[CompatibilityRule]:
+        rules = CompatibilityRuleFactory.get_rules()
+
+        def check_pad_tile(problem_ctx: ProblemContext, kernel_ctx: KernelContext) -> bool:
+            # gfx11 (wave32 WMMA): no-pad 128x128 spills heavily; build/use only the padded
+            # specialization for d128 to keep register spills out of the hot path.
+            if (problem_ctx.hdim, problem_ctx.hdim_v) != (128, 128):
+                return True
+            if problem_ctx.dtype not in cls._DT_FP16_BF16:
+                return True
+
+            is_npad = kernel_ctx.pipeline.F_spad == "f" and kernel_ctx.pipeline.F_skpad == "f"
+            if is_npad:
+                return False
+
+            is_pssk = kernel_ctx.pipeline.F_spad == "t" and kernel_ctx.pipeline.F_skpad == "t"
+            if is_pssk:
+                return kernel_ctx.tile.F_bm0 == 128 and kernel_ctx.tile.F_bn0 == 128
+
+            return True
+
+        rules.append(check_pad_tile)
+        return rules
+
+    @classmethod
+    def supported_dtypes(cls) -> Tuple[str]:
+        return cls._DT_FP16_BF16
+
+    @classmethod
+    def get_hdim_tile_size_dict(cls, dtype: str) -> Optional[dict]:
+        if dtype in cls._DT_FP16_BF16:
+            # gfx11 is closer to gfx12 than gfx9 (wave32 WMMA); start from the gfx12 tile set.
+            return {
+                #                             bm0, bn0, bk0, bn1, bk1,
+                ( 32,  32) : [FmhaFwdTileSize( 64,  64,  16,  32,  32,   32,  4, 1, 1,  4, 1, 1,  16, 16, 16,  16, 16, 16,  -1)],
+                ( 64,  64) : [FmhaFwdTileSize( 64,  64,  32,  64,  32,   64,  4, 1, 1,  4, 1, 1,  16, 16, 16,  16, 16, 16,  -1)],
+                (128, 128) : [FmhaFwdTileSize(128, 128,  32, 128,  32,  128,  8, 1, 1,  8, 1, 1,  16, 16, 16,  16, 16, 16,  -1)],
+                (192, 128) : [FmhaFwdTileSize( 64,  64,  32, 128,  32,  256,  4, 1, 1,  4, 1, 1,  16, 16, 16,  16, 16, 16,  -1)],
+                (256, 256) : [FmhaFwdTileSize( 64,  64,  32, 256,  32,  256,  4, 1, 1,  4, 1, 1,  16, 16, 16,  16, 16, 16,  -1)],
+            }  # fmt: skip
+        else:
+            raise ValueError(f"unsupported dtype={dtype}")
+
+    @classmethod
+    def get_pipelines(
+        cls, dtype, hdim, hdim_v, receipt, mask_impl
+    ) -> List[FmhaFwdPipeline]:
+        if dtype in cls._DT_FP16_BF16:
+            mask_no = "s_no" if mask_impl == "simplified" else "no"
+            return [
+                FmhaFwdPipeline("qr", "row", "t", "t", "f", "f", "f", "no", "f", "f", "no", mask_no, "f", "f", "f")  # fmt: skip
+            ]
+        return []
+
+
 class CustomFactory(KernelComponentFactoryGfx9, CompatibilityRuleFactoryGfx9):
     @classmethod
     def get_hdim_tile_size_dict(cls, dtype: str) -> Optional[dict]:
@@ -1214,6 +1275,9 @@ def get_factory(target: str):
         return KernelComponentFactoryGfx950
     if target.startswith("gfx9"):
         return KernelComponentFactoryGfx9
+
+    if target.startswith("gfx11"):
+        return KernelComponentFactoryGfx11
 
     if target.startswith("gfx12"):
         return KernelComponentFactoryGfx12
