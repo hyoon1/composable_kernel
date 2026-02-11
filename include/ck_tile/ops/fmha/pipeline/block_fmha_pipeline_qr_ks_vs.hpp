@@ -70,11 +70,17 @@ struct BlockFmhaPipelineQRKSVS
     static constexpr bool kIsGfx11 = false;
 #endif
 
+#if defined(__gfx12__)
+    static constexpr bool kIsGfx12 = true;
+#else
+    static constexpr bool kIsGfx12 = false;
+#endif
+
     static constexpr uint32_t DS_READ = 0x100; // Barrier for DS (data share) read
     static constexpr uint32_t MFMA    = 0x008; // Barrier for MFMA (matrix multiply-accumulate)
-    // Fast exp2 path is unstable on gfx11. Force natural exp there even if the compile-time fast
-    // exp2 flag is enabled.
-    static constexpr bool kUseFastExp2 = !kIsGfx11 && CK_TILE_FMHA_FWD_FAST_EXP2;
+    // Keep gfx11/gfx12 on the natural exp path (even if the compile-time fast exp2 flag is
+    // enabled) to match gfx11 behavior.
+    static constexpr bool kUseFastExp2 = !(kIsGfx11 || kIsGfx12) && CK_TILE_FMHA_FWD_FAST_EXP2;
 
     static_assert((kUseFastExp2 &&
                    (kHasLogitsSoftCap && Problem::BiasEnum == BlockAttentionBiasEnum::NO_BIAS ||

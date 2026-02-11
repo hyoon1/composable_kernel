@@ -608,12 +608,12 @@ template <typename FmhaKernel>
 auto fmha_fwd_create_kargs_and_grids(fmha_fwd_args args)
 {
     assert(args.nhead_q % args.nhead_k == 0);
-    // gfx11 kernels force natural exp even when CK_TILE_FMHA_FWD_FAST_EXP2 is enabled.
-    // Compensate for the kernel-side karg scaling (scale_s *= log2e) so gfx11 receives the
+    // gfx11/gfx12 kernels force natural exp even when CK_TILE_FMHA_FWD_FAST_EXP2 is enabled.
+    // Compensate for the kernel-side karg scaling (scale_s *= log2e) so gfx11/gfx12 receive the
     // original "natural" scale.
     const float scale_s = [&] {
 #if CK_TILE_FMHA_FWD_FAST_EXP2
-        if(ck_tile::is_gfx11_supported())
+        if(ck_tile::is_gfx11_supported() || ck_tile::is_gfx12_supported())
         {
             return static_cast<float>(args.scale_s / ck_tile::log2e_v<>);
         }
@@ -770,6 +770,16 @@ auto fmha_fwd_v3_create_kargs_and_grids(fmha_fwd_args args)
         }
     }
 
+    const float scale_s = [&] {
+#if CK_TILE_FMHA_FWD_FAST_EXP2
+        if(ck_tile::is_gfx11_supported() || ck_tile::is_gfx12_supported())
+        {
+            return static_cast<float>(args.scale_s / ck_tile::log2e_v<>);
+        }
+#endif
+        return args.scale_s;
+    }();
+
     auto kargs = [&] {
         if constexpr(FmhaKernel::kIsGroupMode)
         {
@@ -786,7 +796,7 @@ auto fmha_fwd_v3_create_kargs_and_grids(fmha_fwd_args args)
                                          args.hdim_v,
                                          args.nhead_q,
                                          args.nhead_q / args.nhead_k,
-                                         args.scale_s,
+                                         scale_s,
                                          args.logits_soft_cap,
                                          args.stride_q,
                                          args.stride_k,
@@ -817,7 +827,7 @@ auto fmha_fwd_v3_create_kargs_and_grids(fmha_fwd_args args)
                                          args.hdim_v,
                                          args.nhead_q,
                                          args.nhead_q / args.nhead_k,
-                                         args.scale_s,
+                                         scale_s,
                                          args.logits_soft_cap,
                                          args.stride_q,
                                          args.stride_k,
@@ -851,6 +861,15 @@ template <typename FmhaKernel>
 auto fmha_fwd_pagedkv_create_kargs_and_grids(fmha_fwd_pagedkv_args args)
 {
     assert(args.nhead_q % args.nhead_k == 0);
+    const float scale_s = [&] {
+#if CK_TILE_FMHA_FWD_FAST_EXP2
+        if(ck_tile::is_gfx11_supported() || ck_tile::is_gfx12_supported())
+        {
+            return static_cast<float>(args.scale_s / ck_tile::log2e_v<>);
+        }
+#endif
+        return args.scale_s;
+    }();
     auto kargs = [&] {
         // create group mode kernel arguments
         if constexpr(FmhaKernel::kIsGroupMode)
@@ -872,7 +891,7 @@ auto fmha_fwd_pagedkv_create_kargs_and_grids(fmha_fwd_pagedkv_args args)
                                          args.batch_stride_block_table,
                                          args.page_block_size,
                                          args.is_gappy,
-                                         args.scale_s,
+                                         scale_s,
                                          args.scale_p,
                                          args.scale_o,
                                          args.logits_soft_cap,
@@ -915,7 +934,7 @@ auto fmha_fwd_pagedkv_create_kargs_and_grids(fmha_fwd_pagedkv_args args)
                                          args.batch_stride_block_table,
                                          args.page_block_size,
                                          args.cache_batch_idx,
-                                         args.scale_s,
+                                         scale_s,
                                          args.scale_p,
                                          args.scale_o,
                                          args.logits_soft_cap,
@@ -963,6 +982,15 @@ template <typename Kernel>
 auto fmha_fwd_splitkv_create_kargs_and_grids(fmha_fwd_splitkv_args args)
 {
     assert(args.nhead_q % args.nhead_k == 0);
+    const float scale_s = [&] {
+#if CK_TILE_FMHA_FWD_FAST_EXP2
+        if(ck_tile::is_gfx11_supported() || ck_tile::is_gfx12_supported())
+        {
+            return static_cast<float>(args.scale_s / ck_tile::log2e_v<>);
+        }
+#endif
+        return args.scale_s;
+    }();
     auto kargs = [&] {
         // create group mode kernel arguments
         if constexpr(Kernel::kIsGroupMode)
@@ -986,7 +1014,7 @@ auto fmha_fwd_splitkv_create_kargs_and_grids(fmha_fwd_splitkv_args args)
                                      args.batch_stride_block_table,
                                      args.page_block_size,
                                      args.is_gappy,
-                                     args.scale_s,
+                                     scale_s,
                                      args.scale_p,
                                      args.logits_soft_cap,
                                      args.stride_q,
@@ -1031,7 +1059,7 @@ auto fmha_fwd_splitkv_create_kargs_and_grids(fmha_fwd_splitkv_args args)
                                      args.batch_stride_block_table,
                                      args.page_block_size,
                                      args.cache_batch_idx,
-                                     args.scale_s,
+                                     scale_s,
                                      args.scale_p,
                                      args.logits_soft_cap,
                                      args.stride_q,
@@ -1173,6 +1201,15 @@ template <typename FmhaKernel>
 auto fmha_batch_prefill_create_kargs_and_grids(fmha_batch_prefill_args args)
 {
     assert(args.nhead_q % args.nhead_k == 0);
+    const float scale_s = [&] {
+#if CK_TILE_FMHA_FWD_FAST_EXP2
+        if(ck_tile::is_gfx11_supported() || ck_tile::is_gfx12_supported())
+        {
+            return static_cast<float>(args.scale_s / ck_tile::log2e_v<>);
+        }
+#endif
+        return args.scale_s;
+    }();
     using PageTableKargs            = typename FmhaKernel::PageBlockTableKargs;
     const PageTableKargs page_table = [&]() {
         if constexpr(FmhaKernel::kKVLookupTable ==
@@ -1211,7 +1248,7 @@ auto fmha_batch_prefill_create_kargs_and_grids(fmha_batch_prefill_args args)
                                          args.num_total_pages,
                                          args.page_block_size,
                                          page_table,
-                                         args.scale_s,
+                                         scale_s,
                                          args.scale_p,
                                          args.scale_o,
                                          args.logits_soft_cap,
