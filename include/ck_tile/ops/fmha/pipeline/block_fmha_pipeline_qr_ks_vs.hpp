@@ -64,6 +64,12 @@ struct BlockFmhaPipelineQRKSVS
     static constexpr float OCP_FP8_SHIFT  = 8.0f;
     static constexpr float FNUZ_FP8_SHIFT = 7.0f;
 
+#if defined(__gfx11__)
+    static constexpr bool kIsGfx11 = true;
+#else
+    static constexpr bool kIsGfx11 = false;
+#endif
+
     static constexpr uint32_t DS_READ = 0x100; // Barrier for DS (data share) read
     static constexpr uint32_t MFMA    = 0x008; // Barrier for MFMA (matrix multiply-accumulate)
 
@@ -71,6 +77,31 @@ struct BlockFmhaPipelineQRKSVS
                    (kHasLogitsSoftCap && Problem::BiasEnum == BlockAttentionBiasEnum::NO_BIAS ||
                     !kHasLogitsSoftCap)) ||
                   (!CK_TILE_FMHA_FWD_FAST_EXP2 && !kHasLogitsSoftCap));
+
+    template <typename Problem>
+    CK_TILE_HOST_DEVICE static constexpr index_t GetSmemSizePRemap()
+    {
+#if defined(__gfx11__)
+        constexpr index_t align_bytes = 16;
+        constexpr index_t bytes = Problem::BlockFmhaShape::kM0 * Problem::BlockFmhaShape::kN0 *
+                                  sizeof(typename Problem::PDataType);
+        return ck_tile::integer_divide_ceil(bytes, align_bytes) * align_bytes;
+#else
+        return 0;
+#endif
+    }
+
+    template <typename Problem>
+    CK_TILE_HOST_DEVICE static constexpr index_t GetSmemOffsetPRemap()
+    {
+#if defined(__gfx11__)
+        constexpr index_t align_bytes = alignof(typename Problem::PDataType);
+        return ck_tile::integer_divide_ceil(Policy::template GetSmemSizeKV<Problem>(), align_bytes) *
+               align_bytes;
+#else
+        return 0;
+#endif
+    }
 
     // last dimension vector length used to create tensor view(and decide buffer_load vector length)
     // ... together with tensor distribution. tensor dist should able to overwrite this
@@ -129,7 +160,13 @@ struct BlockFmhaPipelineQRKSVS
 
     CK_TILE_HOST_DEVICE static constexpr ck_tile::index_t GetSmemSize()
     {
+#if defined(__gfx11__)
+        constexpr index_t p_remap_end =
+            GetSmemOffsetPRemap<Problem>() + GetSmemSizePRemap<Problem>();
+        return ck_tile::max(Policy::template GetSmemSize<Problem>(), p_remap_end);
+#else
         return Policy::template GetSmemSize<Problem>();
+#endif
     }
 
     template <typename QDramBlockWindowTmp,
@@ -700,7 +737,9 @@ struct BlockFmhaPipelineQRKSVS
             }
 
             block_sync_lds();
-            if constexpr(std::is_same_v<VLayout, ck_tile::tensor_layout::gemm::RowMajor>)
+            constexpr bool kUseVShuffle =
+                std::is_same_v<VLayout, ck_tile::tensor_layout::gemm::RowMajor>;
+            if constexpr(kUseVShuffle)
             {
                 auto v_shuffle_tmp = make_static_distributed_tensor<VDataType>(
                     Policy::template MakeShuffledVRegBlockDescriptor<Problem>());
@@ -717,7 +756,7 @@ struct BlockFmhaPipelineQRKSVS
 
             move_tile_window(v_dram_window, {0, kK1});
 
-            const auto p =
+            auto p =
                 cast_tile<PDataType>(tile_elementwise_in(p_compute_element_func, p_compute));
 
             float v_descale = 1.0f;
@@ -741,34 +780,93 @@ struct BlockFmhaPipelineQRKSVS
                     return o_acc;
                 }
             }();
-            if constexpr(k1_loops > 1)
+
+            if constexpr(kIsGfx11)
             {
-                static_for<0, k1_loops - 1, 1>{}([&](auto i_k1) {
-                    const auto v = load_tile(v_dram_window); // load next v
-                    block_sync_lds();
-                    gemm_1(o_acc_,
-                           get_slice_tile(
-                               p, sequence<0, i_k1 * kK1>{}, sequence<kM0, (i_k1 + 1) * kK1>{}),
-                           v_lds_window);
-                    block_sync_lds();
-                    if constexpr(std::is_same_v<VLayout, ck_tile::tensor_layout::gemm::RowMajor>)
-                    {
-                        auto v_shuffle_tmp = make_static_distributed_tensor<VDataType>(
-                            Policy::template MakeShuffledVRegBlockDescriptor<Problem>());
-                        shuffle_tile(v_shuffle_tmp, v);
-                        store_tile(v_lds_window,
-                                   tile_elementwise_in(v_element_func,
-                                                       v_shuffle_tmp)); // store the prefetch
-                    }
-                    else
-                    {
-                        store_tile(v_lds_window,
-                                   tile_elementwise_in(v_element_func, v)); // store next v
-                    }
-                    move_tile_window(v_dram_window, {0, kK1});
-                });
+                // gfx11 WMMA path: stage P to LDS in a simple row-major layout so KV-GEMM can
+                // reload slices with the expected A distribution. This avoids unsupported/fragile
+                // slicing of a distributed tensor layout.
+                using PDataType_ = PDataType;
+                constexpr auto p_lds_desc = make_naive_tensor_descriptor(
+                    make_tuple(number<kM0>{}, number<kN0>{}),
+                    make_tuple(number<kN0>{}, number<1>{}));
+
+                PDataType_* p_lds_ptr = reinterpret_cast<PDataType_*>(
+                    static_cast<char*>(smem_ptr) + GetSmemOffsetPRemap<Problem>());
+
+                auto p_lds = make_tensor_view<address_space_enum::lds>(p_lds_ptr, p_lds_desc);
+
+                auto p_lds_window_store =
+                    make_tile_window(p_lds,
+                                     make_tuple(number<kM0>{}, number<kN0>{}),
+                                     {0, 0},
+                                     decltype(p)::get_tile_distribution());
+
+                store_tile(p_lds_window_store, p);
+                block_sync_lds();
+
+                if constexpr(k1_loops > 1)
+                {
+                    static_for<0, k1_loops - 1, 1>{}([&](auto i_k1) {
+                        const auto v = load_tile(v_dram_window); // load next v
+
+                        auto p_slice_window = make_tile_window(
+                            p_lds,
+                            make_tuple(number<kM0>{}, number<kK1>{}),
+                            {0, i_k1 * kK1},
+                            decltype(gemm_1)::MakeABlockTileDistribution());
+
+                        const auto p_slice = load_tile(p_slice_window);
+
+                        block_sync_lds();
+                        gemm_1(o_acc_, p_slice, v_lds_window);
+                        block_sync_lds();
+
+                        if constexpr(kUseVShuffle)
+                        {
+                            auto v_shuffle_tmp = make_static_distributed_tensor<VDataType>(
+                                Policy::template MakeShuffledVRegBlockDescriptor<Problem>());
+                            shuffle_tile(v_shuffle_tmp, v);
+                            store_tile(v_lds_window,
+                                       tile_elementwise_in(v_element_func, v_shuffle_tmp));
+                        }
+                        else
+                        {
+                            store_tile(v_lds_window, tile_elementwise_in(v_element_func, v));
+                        }
+                        move_tile_window(v_dram_window, {0, kK1});
+                    });
+                }
             }
-            // move K tile windows
+            else
+            {
+                if constexpr(k1_loops > 1)
+                {
+                    static_for<0, k1_loops - 1, 1>{}([&](auto i_k1) {
+                        const auto v = load_tile(v_dram_window); // load next v
+                        block_sync_lds();
+                        gemm_1(o_acc_,
+                               get_slice_tile(p,
+                                              sequence<0, i_k1 * kK1>{},
+                                              sequence<kM0, (i_k1 + 1) * kK1>{}),
+                               v_lds_window);
+                        block_sync_lds();
+                        if constexpr(kUseVShuffle)
+                        {
+                            auto v_shuffle_tmp = make_static_distributed_tensor<VDataType>(
+                                Policy::template MakeShuffledVRegBlockDescriptor<Problem>());
+                            shuffle_tile(v_shuffle_tmp, v);
+                            store_tile(v_lds_window,
+                                       tile_elementwise_in(v_element_func, v_shuffle_tmp));
+                        }
+                        else
+                        {
+                            store_tile(v_lds_window, tile_elementwise_in(v_element_func, v));
+                        }
+                        move_tile_window(v_dram_window, {0, kK1});
+                    });
+                }
+            }
             if constexpr(kHasSink)
             {
                 if(i_total_loops == 0)
@@ -778,13 +876,41 @@ struct BlockFmhaPipelineQRKSVS
                 }
             }
             move_tile_window(k_dram_block_window, {kN0, 0});
-            // tail
             {
-                block_sync_lds();
-                gemm_1(o_acc_,
-                       get_slice_tile(p, sequence<0, (k1_loops - 1) * kK1>{}, sequence<kM0, kN0>{}),
-                       v_lds_window);
-                block_sync_lds();
+                if constexpr(kIsGfx11)
+                {
+                    using PDataType_ = PDataType;
+                    constexpr auto p_lds_desc = make_naive_tensor_descriptor(
+                        make_tuple(number<kM0>{}, number<kN0>{}),
+                        make_tuple(number<kN0>{}, number<1>{}));
+
+                    PDataType_* p_lds_ptr = reinterpret_cast<PDataType_*>(
+                        static_cast<char*>(smem_ptr) + GetSmemOffsetPRemap<Problem>());
+
+                    auto p_lds = make_tensor_view<address_space_enum::lds>(p_lds_ptr, p_lds_desc);
+
+                    auto p_slice_window = make_tile_window(
+                        p_lds,
+                        make_tuple(number<kM0>{}, number<kK1>{}),
+                        {0, (k1_loops - 1) * kK1},
+                        decltype(gemm_1)::MakeABlockTileDistribution());
+
+                    const auto p_slice = load_tile(p_slice_window);
+
+                    block_sync_lds();
+                    gemm_1(o_acc_, p_slice, v_lds_window);
+                    block_sync_lds();
+                }
+                else
+                {
+                    block_sync_lds();
+                    gemm_1(o_acc_,
+                           get_slice_tile(p,
+                                          sequence<0, (k1_loops - 1) * kK1>{},
+                                          sequence<kM0, kN0>{}),
+                           v_lds_window);
+                    block_sync_lds();
+                }
             }
             if constexpr(QScaleEnum == BlockAttentionQuantScaleEnum::BLOCKSCALE)
             {

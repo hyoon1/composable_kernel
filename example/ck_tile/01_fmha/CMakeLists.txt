@@ -2,10 +2,10 @@
 # SPDX-License-Identifier: MIT
 
 set(INST_TARGETS ${SUPPORTED_GPU_TARGETS})
-# Currently only gfx9 and gfx12 archs are supported by FMHA
-list(FILTER INST_TARGETS INCLUDE REGEX "gfx9|gfx12")
+# Currently gfx9, gfx11, and gfx12 archs are supported by FMHA
+list(FILTER INST_TARGETS INCLUDE REGEX "gfx9|gfx11|gfx12")
 if(NOT INST_TARGETS)
-  message(WARNING "Skipping Tile Engine FMHA compilation: No supported GPU targets (gfx9, gfx12) found in SUPPORTED_GPU_TARGETS: ${SUPPORTED_GPU_TARGETS}")
+  message(WARNING "Skipping Tile Engine FMHA compilation: No supported GPU targets (gfx9, gfx11, gfx12) found in SUPPORTED_GPU_TARGETS: ${SUPPORTED_GPU_TARGETS}")
   return()
 endif()
 
@@ -15,8 +15,12 @@ set(FMHA_FWD_ENABLE_APIS "fwd" CACHE STRING
   "semicolon-separated list of APIs to generate (${FMHA_FWD_KNOWN_APIS}) & link, or \"all\".")
 if(BUILD_TESTING)
   # Build instances of all APIs for tests
-  message(DEBUG "Enabling all FWD APIs of CK Tile FMHA for because testing is enabled")
-  set(FMHA_FWD_ENABLE_APIS "all")
+  # gfx11: keep default to fwd-only by default, even for tests, to avoid pulling in unsupported
+  # instances for other APIs.
+  if(NOT "${INST_TARGETS}" MATCHES "gfx11")
+    message(DEBUG "Enabling all FWD APIs of CK Tile FMHA for because testing is enabled")
+    set(FMHA_FWD_ENABLE_APIS "all")
+  endif()
 endif()
 if(FMHA_FWD_ENABLE_APIS STREQUAL "all")
   set(FMHA_FWD_ENABLE_APIS ${FMHA_FWD_KNOWN_APIS})
