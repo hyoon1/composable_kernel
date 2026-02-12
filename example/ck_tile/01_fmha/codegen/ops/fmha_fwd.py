@@ -319,9 +319,17 @@ class FmhaFwdApiTrait:
             if self.bm0 == max_bm0 or self.bm0 == 64:
                 return "true/*fall back to largest tile*/"
             return f"a.seqlen_q <= {self.bm0}"
+        # gfx12+ tuning (max_bm0 is typically 256)
+        is_npad = (self.spad == "f") and (self.skpad == "f")
         if self.bm0 == 64:
-            return f"a.seqlen_q <= {self.bm0 * 256}"
+            # Keep the 64x64 tile for shorter sequences, but allow padded kernels (pssk) with
+            # larger tiles to take over on long sequences even when seqlens are divisible.
+            return f"a.seqlen_q <= {self.bm0 * 96}"
         if self.bm0 == max_bm0:
+            # On gfx12, the max-tile npad (spad/skpad=false) variants can be much slower than the
+            # corresponding padded (pssk) variants. Prefer padded kernels unless explicitly forced.
+            if is_npad:
+                return "false/*avoid slow max tile npad*/"
             return "true/*fall back to largest tile*/"
         return f"a.seqlen_q <= {self.bm0}"
 
