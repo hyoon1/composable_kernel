@@ -78,28 +78,70 @@ struct BlockFmhaPipelineQRKSVS
                     !kHasLogitsSoftCap)) ||
                   (!CK_TILE_FMHA_FWD_FAST_EXP2 && !kHasLogitsSoftCap));
 
-    template <typename Problem>
-    CK_TILE_HOST_DEVICE static constexpr index_t GetSmemSizePRemap()
+    template <typename BlockGemm1, typename PSliceSrc>
+    CK_TILE_DEVICE static auto MakePSliceForGemm1A(const PSliceSrc& p_slice_src)
     {
 #if defined(__gfx11__)
-        constexpr index_t align_bytes = 16;
-        constexpr index_t bytes = Problem::BlockFmhaShape::kM0 * Problem::BlockFmhaShape::kN0 *
-                                  sizeof(typename Problem::PDataType);
-        return ck_tile::integer_divide_ceil(bytes, align_bytes) * align_bytes;
-#else
-        return 0;
-#endif
-    }
+        // gfx11 WMMA needs A fragments with contiguous K=16 chunks per lane.
+        // With TransposeC WMMA output, P is distributed across the two half-waves as even/odd
+        // columns, so we rebuild the expected A distribution via lane^16 exchange.
+        auto p_slice =
+            make_static_distributed_tensor<PDataType>(BlockGemm1::MakeABlockTileDistribution());
 
-    template <typename Problem>
-    CK_TILE_HOST_DEVICE static constexpr index_t GetSmemOffsetPRemap()
-    {
-#if defined(__gfx11__)
-        constexpr index_t align_bytes = alignof(typename Problem::PDataType);
-        return ck_tile::integer_divide_ceil(Policy::template GetSmemSizeKV<Problem>(), align_bytes) *
-               align_bytes;
+        constexpr index_t src_size = remove_cvref_t<PSliceSrc>::get_thread_buffer_size();
+        constexpr index_t dst_size = remove_cvref_t<decltype(p_slice)>::get_thread_buffer_size();
+        static_assert(dst_size == src_size * 2);
+        static_assert(sizeof(PDataType) == 2);
+        static_assert(get_warp_size() == 32);
+        static_assert(src_size % 8 == 0); // 8 values per 16-column WMMA chunk
+
+        const uint32_t lane_id         = __lane_id();
+        const uint32_t peer_lane       = lane_id ^ 16;
+        const bool local_is_even_cols  = (lane_id & 16) == 0;
+        constexpr index_t num_wmma_k16 = src_size / 8;
+
+        const auto& src_buf = p_slice_src.get_thread_buffer();
+        auto& dst_buf       = p_slice.get_thread_buffer();
+
+        static_for<0, num_wmma_k16, 1>{}([&](auto i_chunk) {
+            constexpr index_t src_base = i_chunk * 8;
+            constexpr index_t dst_base = i_chunk * 16;
+
+            // Pack two 16-bit elements into one 32-bit lane shuffle to reduce shuffle count.
+            static_for<0, 4, 1>{}([&](auto i_pair) {
+                constexpr index_t s = src_base + i_pair * 2;
+
+                const uint32_t local_pack =
+                    (static_cast<uint32_t>(bit_cast<uint16_t>(src_buf[s + 0])) << 0) |
+                    (static_cast<uint32_t>(bit_cast<uint16_t>(src_buf[s + 1])) << 16);
+
+                const uint32_t peer_pack = ck_tile::warp_shuffle(local_pack, peer_lane);
+
+                const uint32_t local_lo = local_pack & 0xFFFFu;
+                const uint32_t local_hi = (local_pack >> 16) & 0xFFFFu;
+                const uint32_t peer_lo  = peer_pack & 0xFFFFu;
+                const uint32_t peer_hi  = (peer_pack >> 16) & 0xFFFFu;
+
+                const uint32_t out0 = local_is_even_cols ? (local_lo | (peer_lo << 16))
+                                                         : (peer_lo | (local_lo << 16));
+                const uint32_t out1 = local_is_even_cols ? (local_hi | (peer_hi << 16))
+                                                         : (peer_hi | (local_hi << 16));
+
+                constexpr index_t d = dst_base + i_pair * 4;
+
+                dst_buf[d + 0] = bit_cast<PDataType>(static_cast<uint16_t>(out0 & 0xFFFFu));
+                dst_buf[d + 1] =
+                    bit_cast<PDataType>(static_cast<uint16_t>((out0 >> 16) & 0xFFFFu));
+                dst_buf[d + 2] = bit_cast<PDataType>(static_cast<uint16_t>(out1 & 0xFFFFu));
+                dst_buf[d + 3] =
+                    bit_cast<PDataType>(static_cast<uint16_t>((out1 >> 16) & 0xFFFFu));
+            });
+        });
+
+        return p_slice;
 #else
-        return 0;
+        (void)p_slice_src;
+        return make_static_distributed_tensor<PDataType>(BlockGemm1::MakeABlockTileDistribution());
 #endif
     }
 
@@ -160,13 +202,7 @@ struct BlockFmhaPipelineQRKSVS
 
     CK_TILE_HOST_DEVICE static constexpr ck_tile::index_t GetSmemSize()
     {
-#if defined(__gfx11__)
-        constexpr index_t p_remap_end =
-            GetSmemOffsetPRemap<Problem>() + GetSmemSizePRemap<Problem>();
-        return ck_tile::max(Policy::template GetSmemSize<Problem>(), p_remap_end);
-#else
         return Policy::template GetSmemSize<Problem>();
-#endif
     }
 
     template <typename QDramBlockWindowTmp,
@@ -783,40 +819,15 @@ struct BlockFmhaPipelineQRKSVS
 
             if constexpr(kIsGfx11)
             {
-                // gfx11 WMMA path: stage P to LDS in a simple row-major layout so KV-GEMM can
-                // reload slices with the expected A distribution. This avoids unsupported/fragile
-                // slicing of a distributed tensor layout.
-                using PDataType_ = PDataType;
-                constexpr auto p_lds_desc = make_naive_tensor_descriptor(
-                    make_tuple(number<kM0>{}, number<kN0>{}),
-                    make_tuple(number<kN0>{}, number<1>{}));
-
-                PDataType_* p_lds_ptr = reinterpret_cast<PDataType_*>(
-                    static_cast<char*>(smem_ptr) + GetSmemOffsetPRemap<Problem>());
-
-                auto p_lds = make_tensor_view<address_space_enum::lds>(p_lds_ptr, p_lds_desc);
-
-                auto p_lds_window_store =
-                    make_tile_window(p_lds,
-                                     make_tuple(number<kM0>{}, number<kN0>{}),
-                                     {0, 0},
-                                     decltype(p)::get_tile_distribution());
-
-                store_tile(p_lds_window_store, p);
-                block_sync_lds();
-
                 if constexpr(k1_loops > 1)
                 {
                     static_for<0, k1_loops - 1, 1>{}([&](auto i_k1) {
                         const auto v = load_tile(v_dram_window); // load next v
-
-                        auto p_slice_window = make_tile_window(
-                            p_lds,
-                            make_tuple(number<kM0>{}, number<kK1>{}),
-                            {0, i_k1 * kK1},
-                            decltype(gemm_1)::MakeABlockTileDistribution());
-
-                        const auto p_slice = load_tile(p_slice_window);
+                        const auto p_slice =
+                            MakePSliceForGemm1A<remove_cvref_t<decltype(gemm_1)>>(
+                                get_slice_tile(p,
+                                               sequence<0, i_k1 * kK1>{},
+                                               sequence<kM0, (i_k1 + 1) * kK1>{}));
 
                         block_sync_lds();
                         gemm_1(o_acc_, p_slice, v_lds_window);
@@ -879,23 +890,11 @@ struct BlockFmhaPipelineQRKSVS
             {
                 if constexpr(kIsGfx11)
                 {
-                    using PDataType_ = PDataType;
-                    constexpr auto p_lds_desc = make_naive_tensor_descriptor(
-                        make_tuple(number<kM0>{}, number<kN0>{}),
-                        make_tuple(number<kN0>{}, number<1>{}));
-
-                    PDataType_* p_lds_ptr = reinterpret_cast<PDataType_*>(
-                        static_cast<char*>(smem_ptr) + GetSmemOffsetPRemap<Problem>());
-
-                    auto p_lds = make_tensor_view<address_space_enum::lds>(p_lds_ptr, p_lds_desc);
-
-                    auto p_slice_window = make_tile_window(
-                        p_lds,
-                        make_tuple(number<kM0>{}, number<kK1>{}),
-                        {0, (k1_loops - 1) * kK1},
-                        decltype(gemm_1)::MakeABlockTileDistribution());
-
-                    const auto p_slice = load_tile(p_slice_window);
+                    const auto p_slice =
+                        MakePSliceForGemm1A<remove_cvref_t<decltype(gemm_1)>>(
+                            get_slice_tile(p,
+                                           sequence<0, (k1_loops - 1) * kK1>{},
+                                           sequence<kM0, kN0>{}));
 
                     block_sync_lds();
                     gemm_1(o_acc_, p_slice, v_lds_window);
