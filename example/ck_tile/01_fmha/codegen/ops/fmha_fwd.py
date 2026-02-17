@@ -1218,7 +1218,10 @@ class KernelComponentFactoryGfx11(CompatibilityRuleFactory):
         if dtype in cls._DT_FP16_BF16:
             mask_no = "s_no" if mask_impl == "simplified" else "no"
             return [
-                FmhaFwdPipeline("qr", "row", "t", "t", "f", "f", "f", "no", "f", "f", "no", mask_no, "f", "f", "f")  # fmt: skip
+                # Prefer the no-kpad specialization when seqlen_k is a multiple of bn0.
+                # The kpad kernel always matches, so order matters here.
+                FmhaFwdPipeline("qr", "row", "t", "f", "f", "f", "f", "no", "f", "f", "no", mask_no, "f", "f", "f"),  # fmt: skip
+                FmhaFwdPipeline("qr", "row", "t", "t", "f", "f", "f", "no", "f", "f", "no", mask_no, "f", "f", "f"),  # fmt: skip
             ]
         return []
 
