@@ -1168,31 +1168,6 @@ class KernelComponentFactoryGfx11(CompatibilityRuleFactory):
     _DT_FP16_BF16 = ("fp16", "bf16")
 
     @classmethod
-    def get_rules(cls) -> List[CompatibilityRule]:
-        rules = CompatibilityRuleFactory.get_rules()
-
-        def check_pad_tile(problem_ctx: ProblemContext, kernel_ctx: KernelContext) -> bool:
-            # gfx11 (wave32 WMMA): no-pad 128x128 spills heavily; build/use only the padded
-            # specialization for d128 to keep register spills out of the hot path.
-            if (problem_ctx.hdim, problem_ctx.hdim_v) != (128, 128):
-                return True
-            if problem_ctx.dtype not in cls._DT_FP16_BF16:
-                return True
-
-            is_npad = kernel_ctx.pipeline.F_spad == "f" and kernel_ctx.pipeline.F_skpad == "f"
-            if is_npad:
-                return False
-
-            is_pssk = kernel_ctx.pipeline.F_spad == "t" and kernel_ctx.pipeline.F_skpad == "t"
-            if is_pssk:
-                return kernel_ctx.tile.F_bm0 == 128 and kernel_ctx.tile.F_bn0 == 128
-
-            return True
-
-        rules.append(check_pad_tile)
-        return rules
-
-    @classmethod
     def supported_dtypes(cls) -> Tuple[str]:
         return cls._DT_FP16_BF16
 
@@ -1217,12 +1192,18 @@ class KernelComponentFactoryGfx11(CompatibilityRuleFactory):
     ) -> List[FmhaFwdPipeline]:
         if dtype in cls._DT_FP16_BF16:
             mask_no = "s_no" if mask_impl == "simplified" else "no"
-            return [
-                # Prefer the no-kpad specialization when seqlen_k is a multiple of bn0.
-                # The kpad kernel always matches, so order matters here.
+            pipelines = [
                 FmhaFwdPipeline("qr", "row", "t", "f", "f", "f", "f", "no", "f", "f", "no", mask_no, "f", "f", "f"),  # fmt: skip
                 FmhaFwdPipeline("qr", "row", "t", "t", "f", "f", "f", "no", "f", "f", "no", mask_no, "f", "f", "f"),  # fmt: skip
             ]
+            if (hdim, hdim_v) == (256, 256):
+                pipelines.insert(
+                    0,
+                    FmhaFwdPipeline(
+                        "qr", "row", "f", "f", "f", "f", "f", "no", "f", "f", "no", mask_no, "f", "f", "f"
+                    ),  # fmt: skip
+                )
+            return pipelines
         return []
 
 

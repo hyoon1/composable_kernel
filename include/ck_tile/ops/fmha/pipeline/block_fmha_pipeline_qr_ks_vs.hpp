@@ -7,6 +7,7 @@
 #include "ck_tile/ops/fmha/block/block_attention_bias_enum.hpp"
 #include "ck_tile/ops/fmha/block/block_dropout.hpp"
 #include "ck_tile/ops/fmha/pipeline/block_fmha_pipeline_qr_ks_vs_default_policy.hpp"
+#include "ck_tile/ops/gemm/warp/warp_wmma_gemm_gfx11_utils.hpp"
 #include "ck_tile/ops/reduce/block/block_reduce.hpp"
 
 namespace ck_tile {
@@ -64,12 +65,6 @@ struct BlockFmhaPipelineQRKSVS
     static constexpr float OCP_FP8_SHIFT  = 8.0f;
     static constexpr float FNUZ_FP8_SHIFT = 7.0f;
 
-#if defined(__gfx11__)
-    static constexpr bool kIsGfx11 = true;
-#else
-    static constexpr bool kIsGfx11 = false;
-#endif
-
     static constexpr uint32_t DS_READ = 0x100; // Barrier for DS (data share) read
     static constexpr uint32_t MFMA    = 0x008; // Barrier for MFMA (matrix multiply-accumulate)
 
@@ -77,73 +72,6 @@ struct BlockFmhaPipelineQRKSVS
                    (kHasLogitsSoftCap && Problem::BiasEnum == BlockAttentionBiasEnum::NO_BIAS ||
                     !kHasLogitsSoftCap)) ||
                   (!CK_TILE_FMHA_FWD_FAST_EXP2 && !kHasLogitsSoftCap));
-
-    template <typename BlockGemm1, typename PSliceSrc>
-    CK_TILE_DEVICE static auto MakePSliceForGemm1A(const PSliceSrc& p_slice_src)
-    {
-#if defined(__gfx11__)
-        // gfx11 WMMA needs A fragments with contiguous K=16 chunks per lane.
-        // With TransposeC WMMA output, P is distributed across the two half-waves as even/odd
-        // columns, so we rebuild the expected A distribution via lane^16 exchange.
-        auto p_slice =
-            make_static_distributed_tensor<PDataType>(BlockGemm1::MakeABlockTileDistribution());
-
-        constexpr index_t src_size = remove_cvref_t<PSliceSrc>::get_thread_buffer_size();
-        constexpr index_t dst_size = remove_cvref_t<decltype(p_slice)>::get_thread_buffer_size();
-        static_assert(dst_size == src_size * 2);
-        static_assert(sizeof(PDataType) == 2);
-        static_assert(get_warp_size() == 32);
-        static_assert(src_size % 8 == 0); // 8 values per 16-column WMMA chunk
-
-        const uint32_t lane_id         = __lane_id();
-        const uint32_t peer_lane       = lane_id ^ 16;
-        const bool local_is_even_cols  = (lane_id & 16) == 0;
-        constexpr index_t num_wmma_k16 = src_size / 8;
-
-        const auto& src_buf = p_slice_src.get_thread_buffer();
-        auto& dst_buf       = p_slice.get_thread_buffer();
-
-        static_for<0, num_wmma_k16, 1>{}([&](auto i_chunk) {
-            constexpr index_t src_base = i_chunk * 8;
-            constexpr index_t dst_base = i_chunk * 16;
-
-            // Pack two 16-bit elements into one 32-bit lane shuffle to reduce shuffle count.
-            static_for<0, 4, 1>{}([&](auto i_pair) {
-                constexpr index_t s = src_base + i_pair * 2;
-
-                const uint32_t local_pack =
-                    (static_cast<uint32_t>(bit_cast<uint16_t>(src_buf[s + 0])) << 0) |
-                    (static_cast<uint32_t>(bit_cast<uint16_t>(src_buf[s + 1])) << 16);
-
-                const uint32_t peer_pack = ck_tile::warp_shuffle(local_pack, peer_lane);
-
-                const uint32_t local_lo = local_pack & 0xFFFFu;
-                const uint32_t local_hi = (local_pack >> 16) & 0xFFFFu;
-                const uint32_t peer_lo  = peer_pack & 0xFFFFu;
-                const uint32_t peer_hi  = (peer_pack >> 16) & 0xFFFFu;
-
-                const uint32_t out0 = local_is_even_cols ? (local_lo | (peer_lo << 16))
-                                                         : (peer_lo | (local_lo << 16));
-                const uint32_t out1 = local_is_even_cols ? (local_hi | (peer_hi << 16))
-                                                         : (peer_hi | (local_hi << 16));
-
-                constexpr index_t d = dst_base + i_pair * 4;
-
-                dst_buf[d + 0] = bit_cast<PDataType>(static_cast<uint16_t>(out0 & 0xFFFFu));
-                dst_buf[d + 1] =
-                    bit_cast<PDataType>(static_cast<uint16_t>((out0 >> 16) & 0xFFFFu));
-                dst_buf[d + 2] = bit_cast<PDataType>(static_cast<uint16_t>(out1 & 0xFFFFu));
-                dst_buf[d + 3] =
-                    bit_cast<PDataType>(static_cast<uint16_t>((out1 >> 16) & 0xFFFFu));
-            });
-        });
-
-        return p_slice;
-#else
-        (void)p_slice_src;
-        return make_static_distributed_tensor<PDataType>(BlockGemm1::MakeABlockTileDistribution());
-#endif
-    }
 
     // last dimension vector length used to create tensor view(and decide buffer_load vector length)
     // ... together with tensor distribution. tensor dist should able to overwrite this
@@ -773,9 +701,7 @@ struct BlockFmhaPipelineQRKSVS
             }
 
             block_sync_lds();
-            constexpr bool kUseVShuffle =
-                std::is_same_v<VLayout, ck_tile::tensor_layout::gemm::RowMajor>;
-            if constexpr(kUseVShuffle)
+            if constexpr(std::is_same_v<VLayout, ck_tile::tensor_layout::gemm::RowMajor>)
             {
                 auto v_shuffle_tmp = make_static_distributed_tensor<VDataType>(
                     Policy::template MakeShuffledVRegBlockDescriptor<Problem>());
@@ -792,8 +718,15 @@ struct BlockFmhaPipelineQRKSVS
 
             move_tile_window(v_dram_window, {0, kK1});
 
-            auto p =
+#if defined(__gfx11__)
+            auto p = make_static_distributed_tensor<PDataType>(
+                decltype(gemm_1)::template MakeABlockTileDistribution<kM0, kN0>());
+            PermuteWarpGemmCToA(
+                p, cast_tile<PDataType>(tile_elementwise_in(p_compute_element_func, p_compute)));
+#else
+            const auto p =
                 cast_tile<PDataType>(tile_elementwise_in(p_compute_element_func, p_compute));
+#endif
 
             float v_descale = 1.0f;
             if constexpr(QScaleEnum == BlockAttentionQuantScaleEnum::BLOCKSCALE)
@@ -816,68 +749,34 @@ struct BlockFmhaPipelineQRKSVS
                     return o_acc;
                 }
             }();
-
-            if constexpr(kIsGfx11)
+            if constexpr(k1_loops > 1)
             {
-                if constexpr(k1_loops > 1)
-                {
-                    static_for<0, k1_loops - 1, 1>{}([&](auto i_k1) {
-                        const auto v = load_tile(v_dram_window); // load next v
-                        const auto p_slice =
-                            MakePSliceForGemm1A<remove_cvref_t<decltype(gemm_1)>>(
-                                get_slice_tile(p,
-                                               sequence<0, i_k1 * kK1>{},
-                                               sequence<kM0, (i_k1 + 1) * kK1>{}));
-
-                        block_sync_lds();
-                        gemm_1(o_acc_, p_slice, v_lds_window);
-                        block_sync_lds();
-
-                        if constexpr(kUseVShuffle)
-                        {
-                            auto v_shuffle_tmp = make_static_distributed_tensor<VDataType>(
-                                Policy::template MakeShuffledVRegBlockDescriptor<Problem>());
-                            shuffle_tile(v_shuffle_tmp, v);
-                            store_tile(v_lds_window,
-                                       tile_elementwise_in(v_element_func, v_shuffle_tmp));
-                        }
-                        else
-                        {
-                            store_tile(v_lds_window, tile_elementwise_in(v_element_func, v));
-                        }
-                        move_tile_window(v_dram_window, {0, kK1});
-                    });
-                }
+                static_for<0, k1_loops - 1, 1>{}([&](auto i_k1) {
+                    const auto v = load_tile(v_dram_window); // load next v
+                    block_sync_lds();
+                    gemm_1(o_acc_,
+                           get_slice_tile(
+                               p, sequence<0, i_k1 * kK1>{}, sequence<kM0, (i_k1 + 1) * kK1>{}),
+                           v_lds_window);
+                    block_sync_lds();
+                    if constexpr(std::is_same_v<VLayout, ck_tile::tensor_layout::gemm::RowMajor>)
+                    {
+                        auto v_shuffle_tmp = make_static_distributed_tensor<VDataType>(
+                            Policy::template MakeShuffledVRegBlockDescriptor<Problem>());
+                        shuffle_tile(v_shuffle_tmp, v);
+                        store_tile(v_lds_window,
+                                   tile_elementwise_in(v_element_func,
+                                                       v_shuffle_tmp)); // store the prefetch
+                    }
+                    else
+                    {
+                        store_tile(v_lds_window,
+                                   tile_elementwise_in(v_element_func, v)); // store next v
+                    }
+                    move_tile_window(v_dram_window, {0, kK1});
+                });
             }
-            else
-            {
-                if constexpr(k1_loops > 1)
-                {
-                    static_for<0, k1_loops - 1, 1>{}([&](auto i_k1) {
-                        const auto v = load_tile(v_dram_window); // load next v
-                        block_sync_lds();
-                        gemm_1(o_acc_,
-                               get_slice_tile(p,
-                                              sequence<0, i_k1 * kK1>{},
-                                              sequence<kM0, (i_k1 + 1) * kK1>{}),
-                               v_lds_window);
-                        block_sync_lds();
-                        if constexpr(kUseVShuffle)
-                        {
-                            auto v_shuffle_tmp = make_static_distributed_tensor<VDataType>(
-                                Policy::template MakeShuffledVRegBlockDescriptor<Problem>());
-                            shuffle_tile(v_shuffle_tmp, v);
-                            store_tile(v_lds_window,
-                                       tile_elementwise_in(v_element_func, v_shuffle_tmp));
-                        }
-                        else
-                        {
-                            store_tile(v_lds_window, tile_elementwise_in(v_element_func, v));
-                        }
-                        move_tile_window(v_dram_window, {0, kK1});
-                    });
-                }
-            }
+            // move K tile windows
             if constexpr(kHasSink)
             {
                 if(i_total_loops == 0)
@@ -887,29 +786,13 @@ struct BlockFmhaPipelineQRKSVS
                 }
             }
             move_tile_window(k_dram_block_window, {kN0, 0});
+            // tail
             {
-                if constexpr(kIsGfx11)
-                {
-                    const auto p_slice =
-                        MakePSliceForGemm1A<remove_cvref_t<decltype(gemm_1)>>(
-                            get_slice_tile(p,
-                                           sequence<0, (k1_loops - 1) * kK1>{},
-                                           sequence<kM0, kN0>{}));
-
-                    block_sync_lds();
-                    gemm_1(o_acc_, p_slice, v_lds_window);
-                    block_sync_lds();
-                }
-                else
-                {
-                    block_sync_lds();
-                    gemm_1(o_acc_,
-                           get_slice_tile(p,
-                                          sequence<0, (k1_loops - 1) * kK1>{},
-                                          sequence<kM0, kN0>{}),
-                           v_lds_window);
-                    block_sync_lds();
-                }
+                block_sync_lds();
+                gemm_1(o_acc_,
+                       get_slice_tile(p, sequence<0, (k1_loops - 1) * kK1>{}, sequence<kM0, kN0>{}),
+                       v_lds_window);
+                block_sync_lds();
             }
             if constexpr(QScaleEnum == BlockAttentionQuantScaleEnum::BLOCKSCALE)
             {
